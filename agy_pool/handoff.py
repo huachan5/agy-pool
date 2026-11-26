@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import heapq
 import json
 import re
 from dataclasses import dataclass
@@ -39,7 +38,7 @@ def _budget(text: str, tokens: int) -> str:
             lo = mid
         else:
             hi = mid - 1
-    return text[:lo] + '…' if tokens else ''
+    return text[:lo] + '…' if tokens > 0 else ''
 
 
 def _git_excerpt(text: str, budget: int) -> str:
@@ -93,7 +92,7 @@ def _dialogue(path: Path | None) -> tuple[list[list[tuple[str, str]]], list[str]
     turns: list[list[tuple[str, str]]] = []
     paths: dict[str, None] = {}
     error = ''
-    for step in heapq.merge(sorted(entries)):
+    for step in sorted(entries):
         kind, text, edited = entries[step]
         if kind == 'ERROR':
             error = text

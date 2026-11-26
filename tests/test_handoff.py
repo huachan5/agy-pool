@@ -60,3 +60,14 @@ def test_missing_sources_are_explicit():
 
     text = HandoffBuilder().build('only anchor').text
     assert all(value in text for value in ('L1', 'L2', 'L3', '暂无历史对话记录', '非 Git 仓库'))
+
+
+def test_chinese_prose_with_token_label_is_not_falsely_blocked():
+    from agy_pool.handoff import HandoffBuilder
+    from agy_pool.store import SensitiveData, guard
+
+    for prose in ('修复 token: 过期校验', '- 硬约束：禁止落盘 token: 明文', '优化 secret: 提示文案'):
+        guard(prose)
+        assert HandoffBuilder.validate_anchor(prose) > 0
+    with pytest.raises(SensitiveData):
+        HandoffBuilder.validate_anchor('token: fabricated-fixture')

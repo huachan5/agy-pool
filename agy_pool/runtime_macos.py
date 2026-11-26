@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -143,16 +144,42 @@ class MacAgyRuntime(AgyRuntime):
     def _wait_interactive(self, child) -> int:
         return self._wait_foreground(child, cancel_on_interrupt=True)
 
+    def _confirm_launch(self, child, on_started) -> AgyProcess:
+        stamp = self.process_creation(child.pid)
+        if stamp is None:
+            raise RuntimeIssue('agy 启动即退出。请检查安装或登录状态后重试。')
+        proc = AgyProcess(child.pid, stamp)
+        on_started(proc)
+        deadline = time.monotonic() + 3.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if child.poll() is None:
+                    return proc
+                break
+            try:
+                child.wait(timeout=remaining)
+                break
+            except subprocess.TimeoutExpired:
+                if child.poll() is None:
+                    return proc
+                break
+            except KeyboardInterrupt:
+                if child.poll() is not None:
+                    break
+                continue
+        raise RuntimeIssue('agy 在 3 秒内退出。请检查安装或登录状态后重试。')
+
     def launch_agy(self, cwd: Path, env: dict[str, str], prompt: str | None, on_started) -> AgyProcess:
         child = self._spawn(cwd, env, prompt)
-        try:
-            proc = self._confirm_launch(child, on_started)
-        except BaseException:
-            # A child and its shell must not both read the terminal after an interrupted launch.
-            self._wait_foreground(child)
-            raise
         self._work_child = child
-        return proc
+        try:
+            return self._confirm_launch(child, on_started)
+        except BaseException:
+            if child.poll() is not None:
+                child.wait()
+                self._work_child = None
+            raise
 
     def finish_session(self) -> bool:
         child = self._work_child

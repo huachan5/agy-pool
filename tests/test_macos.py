@@ -104,6 +104,44 @@ def test_macos_interrupted_guide_keeps_terminal_until_child_leaves(monkeypatch):
     assert next(responses, 'reaped') == 'reaped'
 
 
+def test_macos_ctrl_c_during_launch_confirm_keeps_live_child_and_releases_lock(tmp_path, monkeypatch):
+    from agy_pool.runtime import AgyProcess
+    from agy_pool.runtime_macos import MacAgyRuntime
+
+    runtime = MacAgyRuntime()
+    monkeypatch.setattr(runtime, 'process_creation', lambda pid: 999)
+
+    waits = iter([KeyboardInterrupt(), subprocess.TimeoutExpired(['agy'], 2.5)])
+
+    def wait_with_events(timeout=None):
+        val = next(waits)
+        if isinstance(val, BaseException):
+            raise val
+        return val
+
+    child = SimpleNamespace(pid=4321, poll=lambda: None, wait=wait_with_events)
+    monkeypatch.setattr(runtime, '_spawn', lambda cwd, env, prompt=None: child)
+
+    recorded = []
+    proc = runtime.launch_agy(tmp_path, {}, None, recorded.append)
+    assert proc == AgyProcess(4321, 999)
+    assert recorded == [proc]
+    assert runtime._work_child is child
+
+    # If on_started fails while child stays alive, launch_agy must NOT block holding the lock.
+    runtime2 = MacAgyRuntime()
+    monkeypatch.setattr(runtime2, 'process_creation', lambda pid: 999)
+    waited_in_finish = []
+    child2 = SimpleNamespace(pid=4322, poll=lambda: None, wait=lambda timeout=None: (waited_in_finish.append(True), 0)[1])
+    monkeypatch.setattr(runtime2, '_spawn', lambda cwd, env, prompt=None: child2)
+
+    with pytest.raises(RuntimeError, match='commit boom'):
+        runtime2.launch_agy(tmp_path, {}, None, lambda _p: (_ for _ in ()).throw(RuntimeError('commit boom')))
+    assert waited_in_finish == []
+    assert runtime2.finish_session() is True
+    assert waited_in_finish == [True]
+
+
 @pytest.mark.skipif(sys.platform != 'darwin', reason='native macOS libproc')
 def test_native_macos_process_identity_and_scan(tmp_path):
     import shutil

@@ -102,3 +102,11 @@ def test_windows_pid_requires_matching_creation_time():
     assert not runtime.is_process_alive(os.getpid(), stamp + 1)
     assert not runtime.is_process_alive(99999999, stamp)
     assert all(proc.pid > 0 for proc in runtime.scan_agy_processes())
+
+
+def test_is_process_alive_returns_false_on_permission_error(monkeypatch):
+    from agy_pool.runtime import AgyRuntime
+
+    runtime = AgyRuntime()
+    monkeypatch.setattr(runtime, 'process_creation', lambda pid: (_ for _ in ()).throw(PermissionError(5, 'denied')))
+    assert runtime.is_process_alive(4200, 123456) is False

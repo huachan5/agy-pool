@@ -22,7 +22,7 @@ class SensitiveData(ValueError):
 
 _SENSITIVE = re.compile(
     r'(?i)(?:\b(?:set-cookie|cookie|authorization|password|token|secret|refresh_token|access_token|oauth_token|'
-    r'[\w-]*api[_-]?key|x-(?:antigravity|codeium)-csrf-token)["\']?\s*[:=]\s*[^\r\n]+'
+    r'[\w-]*api[_-]?key|x-(?:antigravity|codeium)-csrf-token)["\']?\s*[:=]\s*["\']?[A-Za-z0-9._~+/=-]{3,}[^\r\n"\']*["\']?'
     r'|\bBearer\s+[^\s,;]+|\bAIza[\w-]{20,}|\bsk-[\w-]{20,}|\bgh[pousr]_[\w-]{20,}'
     r'|\bya29\.[\w.-]+|\beyJ[\w-]+\.[\w-]+\.[\w-]+)'
 )

@@ -160,7 +160,12 @@ class AgyRuntime:
             kernel.CloseHandle(handle)
 
     def is_process_alive(self, pid: int, created: int | None) -> bool:
-        return created is not None and self.process_creation(pid) == created
+        if created is None:
+            return False
+        try:
+            return self.process_creation(pid) == created
+        except PermissionError:
+            return False
 
     def scan_agy_processes(self) -> list[AgyProcess]:
         kernel = _kernel()
