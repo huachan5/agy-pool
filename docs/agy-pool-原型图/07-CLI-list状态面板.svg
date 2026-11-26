@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="928" height="482" viewBox="0 0 928 482">
+<rect width="100%" height="100%" fill="#f6f8fa"/>
+<text x="24" y="29" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="16" font-weight="bold" fill="#1f2328">图 7　CLI 原型 · agy-pool list 账号池与线程总览</text>
+<rect x="24" y="44" width="880" height="340" rx="8" fill="#1e1c2a" stroke="#30363d" stroke-width="1.2"/>
+<text x="40" y="76" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#8b949e">PS C:\Users\Administrator\Desktop\cspace&gt; </tspan><tspan fill="#d4d4d4" font-weight="bold">agy-pool list</tspan></text>
+<text x="40" y="102" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#e5c07b" font-weight="bold">账号槽位</tspan></text>
+<text x="40" y="128" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#8b949e">  槽位      当前  脱敏邮箱            Gemini 5h   7d      快照时间</tspan></text>
+<text x="40" y="154" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#d4d4d4">  main      </tspan><tspan fill="#4ec96a" font-weight="bold">●</tspan><tspan fill="#ffb020" font-weight="bold"> ①</tspan><tspan fill="#d4d4d4">     a***@gmail.com      </tspan><tspan fill="#f44747" font-weight="bold">8%</tspan><tspan fill="#d4d4d4">          72%     刚刚</tspan></text>
+<text x="40" y="180" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#d4d4d4">  backup          b***@gmail.com      94%         90%     2h 前</tspan></text>
+<text x="40" y="232" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#e5c07b" font-weight="bold">任务线程（活跃 2）</tspan></text>
+<text x="40" y="258" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#8b949e">  线程   标题               当前账号   棒次   段状态     工作目录</tspan></text>
+<text x="40" y="284" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#d4d4d4">  T1     重构登录鉴权       backup     #2     running    cspace</tspan></text>
+<text x="40" y="310" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#d4d4d4">  T2     补齐接口回归测试   main       #1     closed     cspace</tspan></text>
+<text x="40" y="362" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#4b5263">提示：使用 --all 查看已 close 线程，使用 --json 输出机器可读格式</tspan><tspan fill="#ffb020" font-weight="bold"> ②</tspan></text>
+<circle cx="34" cy="407" r="9" fill="#ffb020"/>
+<text x="34" y="411.5" text-anchor="middle" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="12" font-weight="bold" fill="#1e1c2a">1</text>
+<text x="52" y="412" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="13.5" fill="#1f2328">绿色圆点 ● 标识本机当前实际登录的账号（通过最近一次邮箱哈希比对得出）</text>
+<circle cx="34" cy="433" r="9" fill="#ffb020"/>
+<text x="34" y="437.5" text-anchor="middle" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="12" font-weight="bold" fill="#1e1c2a">2</text>
+<text x="52" y="438" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="13.5" fill="#1f2328">汇总展示各账号配额快照与所有活跃线程棒次状态，支持 --all 与 --json（FR-11、FR-13）</text>
+</svg>

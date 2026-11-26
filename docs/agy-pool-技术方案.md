@@ -1,0 +1,359 @@
+# `agy-pool` × `agy-hud` 双 Gemini 账号池与无缝接力 — 详细技术方案
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.0**（2026-11-26） |
+| 对齐基线 | [agy-pool-PRD.md](agy-pool-PRD.md)（v1.2：FR-01~FR-14、NFR-01~NFR-07、AC-01~AC-15） |
+| 技术栈 | **纯 Python 3.12 标准库、零第三方依赖**（与 `agy-hud` 保持一致） |
+| 测试框架 | `pytest` + `unittest` |
+
+### 修订记录（v1.0 → v2.0 架构瘦身摘要）
+
+| 版本 | 核心演进 |
+|---|---|
+| v1.0 | `state.json` + 手写 `state.lock` + `live/*.json` 分片合并 + `events.jsonl`，6 模块 + 4 个抽象适配器，含多项初稿预设 |
+| **v2.0** | ① **存储瘦身**：单库 `pool.db`（标准库 `sqlite3` + WAL + 5s `busy_timeout`）取代文件锁与分片合并，并发与崩溃恢复由引擎原生保障；<br>② **模块收敛**：6 模块收敛为 **4 个深模块**（`store.py` / `handoff.py` / `runtime.py` / `cli.py`），消除 Phase 1 过早抽象；<br>③ **对齐 PRD v1.2**：补齐 `email_hash`、全量 `agy.exe` 枚举（托管+非托管）与 `(pid, create_time)` 防复用、源会话存活硬拦截、前置账号校验、600 Token 锚点门禁、HUD 告警优先级与三态文案；<br>④ **M0 预研落盘**：见 [§15 M0 预研实测结论](#15-m0-预研实测结论) |
+
+---
+
+## 1. 领域模型与关键架构决策（ADRs）
+
+### 1.1 领域词汇表（GLOSSARY）
+- **`TaskThread`（逻辑任务线程）**：用户推进的一件独立任务（如 `T1`），跨账号、跨会话持续存在，唯一绑定一份置顶 `Anchor`。
+- **`Anchor`（任务锚点）**：记录 `TaskThread` 的不变目标、验收标准与硬性约束的 Markdown 文档（上限 600 Tokens），每棒交接必完整携带、永不裁剪。
+- **`AccountProfile`（账号槽位）**：对一个逻辑 Gemini 账号的只读元数据描述（别名、`email_hint` 脱敏提示、`email_hash` 本地 SHA-256 截断哈希、最近配额快照与健康状态），**零凭据**。
+- **`SessionSegment`（物理会话段）**：一次真实 `agy` 进程运行周期（`seq=1,2,3...`），归属于一个 `TaskThread` 和一个 `AccountProfile`，记录 `pid`、`pid_create_time`、`conversation_id`、`transcript_path` 与段状态。
+- **`HandoffBundle`（结构化交接包）**：两个相邻 `SessionSegment` 之间传递的 L1/L2/L3 精简 Markdown 接力棒（≤ 3,500 Tokens）。
+- **`EventRecord`（操作审计事件）**：写入 SQLite `events` 表的本地不可变操作日志（建线程、冻结、换号、校验、拉起、回滚等，满足 NFR-07）。
+
+### 1.2 关键架构决策记录（ADRs）
+
+- **ADR-001：使用标准库 `sqlite3` WAL 单库 `pool.db` 替代 JSON + 手写文件锁 + `live/` 分片合并**
+  - **背景**：v1.0 设计需要自维护 `state.lock`、僵尸锁清理、`os.replace` 冲突重试、`live/*.json` 分片与 `reconcile_live()` 合并、`events.jsonl` 轮转，属于极易在 Windows 下出现 `WinError 5/32` 与竞态 bug 的偶然复杂度。
+  - **决策**：采用 Python 3.12 标准库内置的 `sqlite3` 配合 `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`。实测本机只读查询均值 **0.747 ms**（远低于 NFR-03 的 5 ms P95 红线），并发串行、5 秒等锁（PRD §9）、崩溃事务回滚与事件审计（NFR-07）全部由 SQLite 引擎原生提供；`agy-hud` 仍零外部依赖、绝不 `import agy_pool`，仅用标准库 `sqlite3` 执行单次只读查询与防抖单行更新。
+- **ADR-002：收敛为 4 个深模块，消除 Phase 1 过早抽象**
+  - **背景**：Phase 1 本机仅使用一种真实切号模式（选项 A：引导式官方 `/logout` + Google OAuth 登录），提前引入 3 套 Adapter 接口和独立 Orchestrator 套壳会增加近一倍无用样板代码。
+  - **决策**：系统划分为 `store.py`、`handoff.py`、`runtime.py`、`cli.py` 四个深模块，外部 OS 边界统一收口在 `runtime.py`。Phase 2 若新增 `GEMINI_API_KEY` 或外部命令切号，只需在 `runtime.py` 扩展切换函数即可，零重构成本。
+- **ADR-003：`agy -i` 传“指针型单行短指令”而非全量交接正文**
+  - **背景**：Windows 下 `CreateProcess` 参数上限 32,767 字符，且经由 PowerShell / `.cmd` shim 传递含换行与引号的长 Markdown 极易转义错乱。
+  - **决策**：交接正文落盘到 `~/.antigravity/agy-pool/handoffs/<tid>-seg<N>.md`，`agy -i` 仅传入 ≤ 250 字、不含换行符的单行引导词指向该文件路径。
+
+---
+
+## 2. 4 模块深架构与目录布局
+
+### 2.1 目录与包结构
+```text
+C:\Users\Administrator\Desktop\cspace\
+├── agy-hud\                         # 现有仓库（最小侵入增强，绝不 import agy_pool）
+│   ├── hud.py                       # 只读/防抖更新 pool.db + 徽章/告警渲染
+│   ├── config.json                  # 新增 pool 配置段
+│   ├── install.ps1                  # 升级配置迁移
+│   └── test_hud.py                  # 原有全部测试 + pool 联动测试
+│
+└── agy-pool\                        # 独立控制器仓库（纯 Python 3.12 标准库）
+    ├── agy_pool\
+    │   ├── __init__.py
+    │   ├── store.py                 # 深模块：SQLite WAL 5 表、事务迁移、零凭据守卫、事件日志
+    │   ├── handoff.py               # 深模块：锚点 600-token 门禁、L1/L2/L3 抽取、3500-token 裁剪、脱敏
+    │   ├── runtime.py               # 唯一 OS 边界：Win32 枚举 agy.exe、防 PID 复用探活、账号校验、引导换号、agy -i 拉起
+    │   └── cli.py                   # CLI 入口与两阶段切号编排（account/start/anchor/handoff/switch/status/list/close）
+    ├── tests\
+    │   ├── test_store.py
+    │   ├── test_handoff.py
+    │   ├── test_runtime.py
+    │   └── test_cli_e2e.py
+    ├── agy-pool.cmd                 # Windows shim（调用 Python 3.12 -m agy_pool.cli）
+    ├── install.ps1                  # 初始化 ~/.antigravity/agy-pool 目录与 PATH shim
+    └── README.md
+```
+
+### 2.2 深模块接口与可测性 Seam
+
+| 模块 | 对外精简接口 | 隐藏的内部复杂性 | 可测性 Seam |
+|---|---|---|---|
+| `store.py` (`PoolStore`) | `init_db()`, `transaction()`, `list_threads()`, `get_account()`, `record_event()`, `export_snapshot()` | WAL 初始化、5s `busy_timeout`、`schema_version` 备份迁移、零凭据递归键名/模式守卫、事务原子提交 | 传入 `tmp_path / "pool.db"` 即可完整实测 |
+| `handoff.py` (`HandoffBuilder`) | `validate_anchor(text, max_tokens=600)`, `estimate_tokens(text)`, `build(...) -> HandoffResult` | `transcript.jsonl` 按 `step_index` 去重、噪音过滤、`task.md` 解析、`git status/diff --stat`、预算优先级裁剪、出库正则脱敏 | 纯数据变换 + 依赖注入采集器 |
+| `runtime.py` (`AgyRuntime`) | `scan_agy_processes()`, `is_process_alive(pid, create_time)`, `read_current_auth()`, `guide_account_switch()`, `launch_agy(...)` | Win32 `ctypes` `CreateToolhelp32Snapshot` 全量枚举 `agy.exe`、`GetProcessTimes` 防 PID 复用、读 `status-state.json` / 兜底 `GetUserStatus`、拉起并做 3s 存活监测 | 测试时仅需注入 `FakeRuntime` 替换这一处边界 |
+| `cli.py` | `main(argv)` + 子命令处理 | 线程省略规则（`AGY_POOL_THREAD_ID` → `cwd` 唯一活跃线程 → 报错列候选）、并发冲突拦截（退出码 3）、两阶段切号与 `--cancel` 回滚、`--json` 输出 | 通过 `FakeRuntime` + `tmp_path` 跑全命令行端到端 |
+
+---
+
+## 3. SQLite Schema（`~/.antigravity/agy-pool/pool.db`）
+
+### 3.1 运行时目录布局
+```text
+~/.antigravity/agy-pool/
+├── pool.db                          # SQLite WAL 主库（+ pool.db-wal / pool.db-shm）
+├── anchors/
+│   └── T1.md                        # 线程 T1 的不变初心锚点（≤ 600 Tokens）
+└── handoffs/
+    ├── T1-seg1.md                   # 第 1 棒 → 第 2 棒交接包（≤ 3,500 Tokens）
+    └── T1-seg2.md
+```
+
+### 3.2 `schema_version = 1` 完整建表 SQL
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+-- 初始键：schema_version='1', active_machine_account='', next_thread_seq='1'
+
+CREATE TABLE IF NOT EXISTS accounts (
+    account_id          TEXT PRIMARY KEY,
+    label               TEXT,
+    email_hint          TEXT,               -- 脱敏展示，如 a***@gmail.com
+    email_hash          TEXT UNIQUE,        -- SHA-256(lower(email))[:16]，绝不存明文邮箱
+    status              TEXT NOT NULL,      -- ready / active / cooldown / exhausted
+    gemini_5h_remaining REAL,               -- 0.0 ~ 1.0
+    gemini_5h_reset_at  TEXT,               -- ISO-8601 UTC
+    gemini_7d_remaining REAL,
+    quota_updated_at    TEXT,
+    cooldown_until      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS threads (
+    thread_id          TEXT PRIMARY KEY,
+    title              TEXT NOT NULL,
+    cwd                TEXT NOT NULL,
+    anchor_path        TEXT NOT NULL,
+    status             TEXT NOT NULL,       -- active / closed
+    current_segment_id TEXT,
+    segment_count      INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS segments (
+    segment_id          TEXT PRIMARY KEY,
+    thread_id           TEXT NOT NULL REFERENCES threads(thread_id),
+    seq                 INTEGER NOT NULL,
+    account_id          TEXT NOT NULL REFERENCES accounts(account_id),
+    parent_segment_id   TEXT,
+    conversation_id     TEXT,
+    transcript_path     TEXT,
+    handoff_in_path     TEXT,
+    handoff_out_path    TEXT,
+    pid                 INTEGER,
+    pid_create_time     INTEGER,            -- Win32 FILETIME 64-bit 整数，防 PID 复用
+    status              TEXT NOT NULL,      -- starting / running / closed / handoff_pending / handed_off / failed
+    observed_email_hint TEXT,
+    observed_email_hash TEXT,
+    started_at          TEXT NOT NULL,
+    ended_at            TEXT,
+    last_heartbeat_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    event_type  TEXT NOT NULL,              -- thread_start / handoff_frozen / switch_start / switch_commit / switch_cancel / auth_mismatch / launch_failed
+    thread_id   TEXT,
+    segment_id  TEXT,
+    account_id  TEXT,
+    detail_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_threads_cwd_status ON threads(cwd, status);
+CREATE INDEX IF NOT EXISTS idx_segments_thread_seq ON segments(thread_id, seq);
+CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
+```
+
+### 3.3 迁移与零凭据写前守卫
+- **Schema 迁移**：打开数据库前校验 `meta.schema_version`；若低于当前版本，先复制备份 `pool.db.v{old}.bak`，再在单一事务内顺序执行 `MIGRATIONS[v -> v+1]`；若高于当前版本，拒绝写入并提示升级 `agy-pool`。
+- **零凭据写前守卫（NFR-01）**：`PoolStore` 写入任何字段或 `detail_json` 前执行键名与正则守卫，**严禁**出现 `token`、`cookie`、`secret`、`api_key`、`password` 键名及原始邮箱/`AIza...`/`sk-...`/`Bearer ...` 模式；邮箱在进入 `store.py` 前只保留脱敏提示 `email_hint` 与不可逆截断哈希 `email_hash`。
+
+---
+
+## 4. 进程枚举、防 PID 复用与核心状态机
+
+### 4.1 全量 `agy.exe` 枚举与防 PID 复用（FR-09 / AC-14 / PRD §9）
+- 使用纯标准库 `ctypes` 调用 Win32 API：
+  1. `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)` + `Process32FirstW` / `Process32NextW` 枚举本机**所有** `agy.exe` 进程（同时覆盖 `segments` 表中的托管会话与未登记的原生非托管窗口）；
+  2. 对每个进程调用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)` + `GetProcessTimes` 提取 64 位 `FILETIME` 启动时间 `pid_create_time`，配合 `GetExitCodeProcess == STILL_ACTIVE (259)` 判断存活。
+- **判定逻辑**：只有当 `pid` 存活 **且** `pid_create_time == segment.pid_create_time` 时，才认为该段仍在运行；若系统把死进程的 PID 复用到其他程序，直接识别为已退出并收敛为 `closed`。
+
+### 4.2 `SessionSegment` 状态机（严格对齐 FR-08 / FR-12）
+```text
+                        (agy-pool start / switch)
+                                    │
+                                    ▼
+                              ┌──────────┐  拉起后 3s 内退出
+                              │ starting │──────────────────────► ┌────────┐
+                              └────┬─────┘                        │ failed │ (保留交接包)
+                                   │ 3s 存活确认 / HUD 心跳        └────────┘
+                                   ▼
+                              ┌──────────┐
+                              │ running  │◄──(FR-08 硬约束：running 时 switch 最多冻结
+                              └────┬─────┘     handoff.md，必须先 /exit 才能进换号)
+                                   │ 进程退出 / 探活已死
+                                   ▼
+                              ┌──────────┐
+                ┌────────────►│  closed  │◄───────────────┐
+                │             └────┬─────┘                │
+                │                  │ 冻结交接包并启动换号   │ switch --cancel 回滚
+                │                  ▼                      │
+                │         ┌─────────────────┐             │
+                │         │ handoff_pending │─────────────┘
+                │         │ (交接包已冻结)  │ (Ctrl+C 中断后重跑 switch 幂等续接)
+                │         └────────┬────────┘
+                │                  │ 换号通过账号校验 + 下一棒 seg(N+1) 3s 存活提交
+                │                  ▼
+                │           ┌────────────┐
+                │           │ handed_off │
+                │           └────────────┘
+                │
+       (新段 seg(N+1) 走同一生命周期，handoff_in_path 指向 seg(N) 的交接包)
+```
+
+### 4.3 两阶段切号、并发拦截与前置账号校验时序图
+```text
+用户终端           agy-pool (cli.py)           PoolStore (pool.db)       AgyRuntime (OS/引导)       新 agy + agy-hud
+   │                      │                           │                         │                        │
+   │ switch --to backup   │                           │                         │                        │
+   ├─────────────────────►│                           │                         │                        │
+   │                      │ 1. reconcile: 探活已知段 + 全量扫描本机 agy.exe ─────►│                        │
+   │                      │    ├─ 源段仍 running ─► 仅冻结交接包，提示先 /exit 退出 (FR-08, AC-13)        │
+   │                      │    └─ 发现其他存活 agy (托管/非托管) 且未 --force(yes) ─► 退出码 3 拦截 (FR-09)│
+   │                      │                                                                              │
+   │                      │ 2. [Phase 1: Freeze]                                                         │
+   │                      │    生成 handoffs/T1-seg1.md (≤3500 Tokens, 已脱敏)                            │
+   │                      │    事务置 seg1=handoff_pending + 写 events ────────►│                        │
+   │                      │                                                                              │
+   │                      │ 3. [Phase 2: Guided Switch & Pre-flight Auth Check]                          │
+   │                      │    记录 switch_started_at，启动临时引导会话或提示 ────►│                        │
+   │◄─────────────────────┼─ 提示: ① /logout ② 浏览器登录 backup ③ /exit 返回 ──│                        │
+   │  登录完毕 /exit      │                                                                              │
+   ├─────────────────────►│                                                                              │
+   │                      │ 4. 拉起下一棒前校验实际登录账号 (FR-10, AC-08):                               │
+   │                      │    读 status-state.json(ts > switch_started_at) 兜底调 GetUserStatus          │
+   │                      │    比对 email_hash == accounts['backup'].email_hash                           │
+   │                      │    ├─ 不匹配 ─► 原地拦截报错，允许重试或 switch --cancel (不浪费配额!)        │
+   │                      │    └─ 匹配   ─► 继续                                                         │
+   │                      │                                                                              │
+   │                      │ 5. [Phase 3: Launch & Commit]                                                │
+   │                      │    拉起 agy -i "<≤250字单行短指令指向 T1-seg1.md>" ──────────────────────────►│
+   │                      │    注入 ENV: AGY_POOL_THREAD_ID / AGY_POOL_SEGMENT_ID / AGY_POOL_ACCOUNT       │
+   │                      │    等待 3s 存活检查:                                                           │
+   │                      │    ├─ 3s 内闪退 ─► seg2=failed, seg1 回退 closed, 保留交接包                   │
+   │                      │    └─ 存活成功  ─► 事务: seg1=handed_off, seg2=running, active_account=backup  │
+   │                      │◄──────────────────────────┤                         │   HUD 写回 conv_id     │
+```
+
+---
+
+## 5. 交接包生成与锚点门禁（`handoff.py`）
+
+### 5.1 锚点硬门禁（FR-02 / AC-12）
+- 执行 `agy-pool start` 或 `agy-pool anchor edit` 保存后，立即调用 `validate_anchor(text, max_tokens=600)`；
+- 若估算 Token 数 `> 600`，拒绝创建线程或拒绝落盘新锚点，报错并精确输出当前 Token 数与 `600` 上限，提示精简条目。
+
+### 5.2 三层结构与裁剪顺序（总预算硬上限 `3,500 Tokens`）
+1. **L1 任务现状（目标预算 1,200 Tokens，锚点永不裁剪）**：
+   - `anchors/<tid>.md` 全文（最高优先级，**任何情况下永不裁剪**）；
+   - `brain/<conv_id>/task.md` 复选框进度；
+   - `git status --porcelain` + `git diff --stat`（非 Git 目录优雅降级标注 `"非 Git 仓库"`）。
+2. **L2 对话精华（目标预算 2,000 Tokens，去噪）**：
+   - 按 `step_index` 去重（跳过尾部半截非法 JSON 行；缺失时降级标注 `"暂无历史对话记录"`）；
+   - 提取最近 6 轮 `USER_INPUT` 与 `PLANNER_RESPONSE` 结论、改动文件路径表、最近报错摘要（每条 ≤ 300 字符）；
+   - **全部丢弃**大段 `read_file` 原文、`run_command` 正常 stdout 与思考草稿。
+3. **L3 溯源指针（预算 300 Tokens）**：
+   - 上一棒 `segment_id`、`account_id`、`conversation_id`、`transcript_path` 与接力链轨迹（如 `#1(main) -> #2(backup)`）。
+- **超预算裁剪顺序（PRD §9）**：
+  1. 精简 L3 非必要展示文本（保留 `segment_id` 与 `transcript_path`）；
+  2. 逐轮移除 L2 最老对话轮次（保底保留最近 2 轮 + 改动文件表 + 最新报错）；
+  3. 压缩 L2 单轮摘要字符上限；
+  4. 若 L1 因超大 `git diff --stat`（如改动数百个文件）挤压整体预算，截断文件清单为前 25 个并附 `...及另外 N 个文件`——**`anchors/<tid>.md` 全文始终 100% 原样保留**。
+
+### 5.3 Token 估算与出库脱敏
+- **估算公式**：`math.ceil(cjk_chars / 1.5 + other_chars / 4.0)`。
+- **出库脱敏**：所有写入 `handoff.md` 的内容经过正则脱敏（`AIza[0-9A-Za-z_-]{35}`、`sk-[A-Za-z0-9_-]{20,}`、`Bearer\s+\S+`、`x-antigravity-csrf-token`、`gh[pousr]_[A-Za-z0-9_]{20,}` 等），统一替换为 `[REDACTED]`。
+
+### 5.4 `agy -i` 短引导词模板（无换行、≤ 250 字）
+```text
+你是任务线程 T1（重构登录鉴权）的第 2 棒接力助手。请先用 read_file 读取交接包 C:/Users/Administrator/.antigravity/agy-pool/handoffs/T1-seg1.md，用3-5条简短要点复述目标、已完成进度和下一步行动后继续推进，不要编造交接包或仓库外信息。
+```
+
+---
+
+## 6. `agy-hud` 最小侵入式改造方案
+
+> **前置同步要求**：M3 动工前，必须先在 `agy-hud` 目录执行 `git pull origin main` 合入远端最新提交 `713dfd1`，再基于最新版本实施改造。
+
+保持 `agy-hud/hud.py` 单文件零第三方依赖、**绝不 `import agy_pool`**，仅通过环境变量 + 标准库 `sqlite3` 访问 `~/.antigravity/agy-pool/pool.db`。
+
+### 6.1 配置新增（`agy-hud/config.json` & `hud.py` `DEFAULT_CONFIG` & `install.ps1`）
+```json
+"pool": {
+  "enabled": true,
+  "showThreadBadge": true,
+  "lowQuotaThresholdPercent": 15,
+  "syncLiveTelemetry": true,
+  "liveSyncIntervalSeconds": 5
+}
+```
+
+### 6.2 `hud.py` 精确改动设计
+1. **路径与常量**：新增 `POOL_DB_FILE`（支持 `AGY_POOL_HOME` / `AGY_POOL_DB` 覆盖，默认 `~/.antigravity/agy-pool/pool.db`）与 `I18N` 提示词条。
+2. **`load_pool_context(config)`**：
+   - 检查环境变量 `AGY_POOL_THREAD_ID` / `AGY_POOL_SEGMENT_ID` / `AGY_POOL_ACCOUNT`；
+   - **非托管会话**（无环境变量）直接返回 `None`，零 SQLite 打开开销、零输出变化（满足 NFR-02 / AC-10）；
+   - **托管会话**使用 `sqlite3.connect(f"file:{POOL_DB_FILE}?mode=ro", uri=True, timeout=0.2)` 单次只读查询当前段 `seq`、所有备用槽位配额快照与目标槽位 `email_hash`；库缺失或 `sqlite3.Error` 静默返回 `None`。
+3. **`sync_pool_live_telemetry(data, stdin_pools, pool_ctx, config, now)`**：
+   - 在 `main()` 写入 `status-state.json` 旁调用；按 `liveSyncIntervalSeconds`（默认 5s，或首次拿到 `conversation_id` 时立即）执行一次轻量 `UPDATE` 写入 `conversation_id`、`transcript_path`、`observed_email_hint`、`observed_email_hash`、`last_heartbeat_at` 及当前账号 `accounts` 配额快照；失败静默忽略。
+4. **第 1 行徽章（`render_project_line()`）**：在 `[Model]` 徽章后追加青绿色 `[T1·main·#1]`。
+5. **第 2 行尾部告警（`render_usage_segment()`，严格按优先级互斥展示）**：
+   - **优先级 1（红色，FR-10）**：若 `stdin.email` 计算出的哈希与当前槽位 `email_hash` 不一致 → `⚠ 账号不符：实际 a***@gmail.com`；
+   - **优先级 2（橙色，FR-06 三态）**：若当前账号 `gemini-5h` 剩余 `<= lowQuotaThresholdPercent`（默认 `15%`），选择备用槽位按三态渲染：
+     - 有快照且未过重置时间：`⚠ 建议切换 backup（94%·2h前）`
+     - 快照记录的 `gemini_5h_reset_at <= now`：`⚠ 建议切换 backup（已重置）`
+     - 备用槽位从未记录过配额：`⚠ 建议切换 backup（未知余量）`
+
+---
+
+## 7. 分阶段开发计划（M1~M4）与 `pytest` 测试矩阵
+
+### 7.1 里程碑计划
+- **M0 预研**：✅ 已完成（见 [§15](#15-m0-预研实测结论)）。
+- **M1 内核（`store.py` + `handoff.py`）**：SQLite WAL 5 表与迁移、零凭据守卫、600 Token 锚点校验、L1/L2/L3 交接包生成与 3,500 Token 裁剪、脱敏 → 对应 AC-06 / AC-11 / AC-12。
+- **M2 编排与 CLI（`runtime.py` + `cli.py` + `install.ps1`）**：Win32 `agy.exe` 全量枚举、`(pid, create_time)` 探活、`account add/list/remove`、`start`、`anchor edit`、`handoff`、`switch`（含 `--cancel` / `--force`）、`status`、`list`、`close`、`resume` → 对应 AC-01 / AC-02 / AC-05 / AC-08 / AC-09 / AC-13 / AC-14 / AC-15。
+- **M3 HUD 联动**：先 `git pull origin main` 同步 `agy-hud` 远端 `713dfd1`，再修改 `hud.py`、`config.json`、`install.ps1`、`test_hud.py` → 对应 AC-03 / AC-04 / AC-07 / AC-10 + 原有测试全绿。
+- **M4 真机演练**：双窗口并行 + `main → backup → main` 真实 `/logout` + OAuth 登录 + `agy -i` 全流程实测验收。
+
+### 7.2 自动化测试矩阵与运行命令
+
+| 测试文件 | 核心用例与覆盖标准 |
+|---|---|
+| `agy-pool/tests/test_store.py` | 初始化幂等、WAL 并发 `busy_timeout`、事务回滚、schema 备份迁移、零凭据键名与原文守卫、`events` 审计记录（AC-01, AC-11, NFR-01, NFR-04） |
+| `agy-pool/tests/test_handoff.py` | 锚点 600 Token 拦截、L1/L2/L3 生成、`step_index` 去重、三棒回切锚点零失真、10 万 Token 超大日志裁剪至 ≤ 3,500 Tokens、Token 公式边界、缺失上下文降级、正则 `[REDACTED]` 脱敏（AC-05, AC-06, AC-11, AC-12） |
+| `agy-pool/tests/test_runtime.py` | Win32 `ctypes` `agy.exe` 枚举与 `(pid, create_time)` 防复用、3 秒闪退判 `failed`、无黑框标志核验、`FakeRuntime` 契约（AC-09, AC-14） |
+| `agy-pool/tests/test_cli_e2e.py` | `account add --from-current`、`start`、`anchor edit`、源段存活禁换号、托管+非托管并发拦截与 `--force` 输入 `yes`、误登账号阻断、`Ctrl+C` 续接与 `switch --cancel`、`list --all --json`、`close`（AC-01, AC-02, AC-05, AC-07~09, AC-13~15） |
+| `agy-hud/test_hud.py` | 既有全量测试绿灯 + 非托管零差异、`pool.db` 缺失/损坏静默降级、徽章渲染、账号不符红色告警优先、低额三态文案（AC-03, AC-04, AC-07, AC-08, AC-10, NFR-02, NFR-03） |
+
+```powershell
+& "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe" -m pytest C:\Users\Administrator\Desktop\cspace\agy-pool\tests -v
+& "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe" -m unittest discover -s C:\Users\Administrator\Desktop\cspace\agy-hud -p "test_*.py" -v
+```
+
+---
+
+## 15. M0 预研实测结论
+
+> 已于 2026-11-26 在本机（Windows + Python 3.12）完成非破坏性技术验证（未触发 `/logout` 以保持当前工作会话稳定）：
+
+1. **M0-1 `stdin.email` 可用性**：✅ **已验证可用**
+   - 实测读取本机 `~/.antigravity/status-state.json`（由 `agy` 调用 `agy-hud` 写入），确认包含 `email`（已脱敏核验非空）、`plan_tier`（`Google AI Pro`）、`session_id`、`model`、`timestamp` 字段；
+   - 可直接支撑 `account add --from-current`、换号后账号一致性校验（FR-10）以及 HUD 运行中账号不符红色告警，同时保留本地 LanguageServer `GetUserStatus` 作为缺失兜底。
+2. **M0-2 Win32 进程枚举与 SQLite WAL 性能**：✅ **已验证远超指标**
+   - 纯 Python 3.12 `ctypes` 调用 `CreateToolhelp32Snapshot` + `GetProcessTimes` 全量枚举本机 `agy.exe`（返回 `pid`、`ppid` 与 64 位启动 `FILETIME`），实测耗时 **6.56 ms**，零子进程、无黑框弹窗；
+   - Python 3.12 `sqlite3` WAL 模式只读查询 20 次平均耗时 **0.747 ms**（远低于 NFR-03 的 `≤ 5 ms` P95 限制）。
+3. **M0-3 `agy -i` 参数与 `/logout` 单登录态确认**：✅ **已确认前提**
+   - 实测本机 `agy --help` 原生支持 `-i`（`--prompt-interactive`）与 `-r`（`--resume`），且**无** `login/logout` CLI 子命令；
+   - 本机 `GEMINI_API_KEY` 未设置，登录态统一由 Windows 凭据管理器维护，确认为全机单登录态（`/logout` 会影响所有存活 `agy` 窗口，验证了 FR-09 全量并发拦截的必要性）；
+   - 交互式 `/logout` 浏览器换号及 `agy -i` 完整对话接力留待 **M4 真机演练** 阶段一并验收。

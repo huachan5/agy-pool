@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="928" height="274" viewBox="0 0 928 274">
+<rect width="100%" height="100%" fill="#f6f8fa"/>
+<text x="24" y="29" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="16" font-weight="bold" fill="#1f2328">图 3　低额度预警的三种快照状态文案（第 2 行尾部对照）</text>
+<rect x="24" y="44" width="880" height="106" rx="8" fill="#1e1c2a" stroke="#30363d" stroke-width="1.2"/>
+<text x="40" y="76" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#8b949e">… │ Gemini 5h: </tspan><tspan fill="#f44747">8%</tspan><tspan fill="#8b949e"> (2h 05m) | 7d: </tspan><tspan fill="#ff6ea8">23%</tspan><tspan fill="#8b949e"> (4d 22h) │ </tspan><tspan fill="#f0a440" font-weight="bold">⚠ 建议切换 backup（94%·2h前）</tspan><tspan fill="#ffb020" font-weight="bold"> ①</tspan></text>
+<text x="40" y="102" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#8b949e">… │ Gemini 5h: </tspan><tspan fill="#f44747">8%</tspan><tspan fill="#8b949e"> (2h 05m) | 7d: </tspan><tspan fill="#ff6ea8">23%</tspan><tspan fill="#8b949e"> (4d 22h) │ </tspan><tspan fill="#f0a440" font-weight="bold">⚠ 建议切换 backup（已重置）</tspan><tspan fill="#ffb020" font-weight="bold"> ②</tspan></text>
+<text x="40" y="128" font-family="Consolas, 'Cascadia Mono', 'Microsoft YaHei', 'PingFang SC', monospace" font-size="14" xml:space="preserve"><tspan fill="#8b949e">… │ Gemini 5h: </tspan><tspan fill="#f44747">8%</tspan><tspan fill="#8b949e"> (2h 05m) | 7d: </tspan><tspan fill="#ff6ea8">23%</tspan><tspan fill="#8b949e"> (4d 22h) │ </tspan><tspan fill="#f0a440" font-weight="bold">⚠ 建议切换 backup（未知余量）</tspan><tspan fill="#ffb020" font-weight="bold"> ③</tspan></text>
+<circle cx="34" cy="173" r="9" fill="#ffb020"/>
+<text x="34" y="177.5" text-anchor="middle" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="12" font-weight="bold" fill="#1e1c2a">1</text>
+<text x="52" y="178" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="13.5" fill="#1f2328">有快照且未过重置时刻：展示快照余量与距今时长（如 94%·2h前）</text>
+<circle cx="34" cy="199" r="9" fill="#ffb020"/>
+<text x="34" y="203.5" text-anchor="middle" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="12" font-weight="bold" fill="#1e1c2a">2</text>
+<text x="52" y="204" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="13.5" fill="#1f2328">当前时间已超过快照记录的 gemini_5h_reset_at：判定配额已恢复满额，展示（已重置）</text>
+<circle cx="34" cy="225" r="9" fill="#ffb020"/>
+<text x="34" y="229.5" text-anchor="middle" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="12" font-weight="bold" fill="#1e1c2a">3</text>
+<text x="52" y="230" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="13.5" fill="#1f2328">备用槽位注册后从未在 HUD 中观测过配额：展示（未知余量），不阻塞切号流程</text>
+</svg>
