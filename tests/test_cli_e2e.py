@@ -57,6 +57,9 @@ class FakeRuntime:
     def is_process_alive(self, pid, created):
         return self.process_creation(pid) == created and created is not None
 
+    def finish_session(self):
+        return False
+
     def launch_agy(self, cwd, env, prompt, on_started):
         from agy_pool.runtime import AgyProcess, RuntimeIssue
 
@@ -91,6 +94,54 @@ def pool(tmp_path, monkeypatch):
 def segment_state(path, segment='T1-seg1'):
     with sqlite3.connect(path / 'pool.db') as conn:
         return conn.execute('SELECT status FROM segments WHERE segment_id=?', (segment,)).fetchone()[0]
+
+
+@pytest.mark.parametrize('command', ['start', 'switch'])
+def test_foreground_session_waits_after_lock_release_and_records_exit(pool, command):
+    call, fake, home = pool
+    fake.procs.clear()
+    fake.guide = 'backup@example.test'
+    waited = []
+
+    def finish_session():
+        assert not fake.locked
+        waited.append(True)
+        fake.procs.clear()
+        return True
+
+    fake.finish_session = finish_session
+    if command == 'start':
+        assert call('start', '另一个任务', '--account', 'main') == 0
+        segment = 'T2-seg1'
+    else:
+        assert call('switch', 'T1', '--to', 'backup') == 0
+        segment = 'T1-seg2'
+    assert waited == [True]
+    assert segment_state(home, segment) == 'closed'
+
+
+@pytest.mark.parametrize('command', ['start', 'switch'])
+def test_foreground_session_is_drained_even_when_launch_commit_fails(pool, command, monkeypatch):
+    from agy_pool.cli import Controller
+
+    call, fake, _ = pool
+    fake.procs.clear()
+    fake.guide = 'backup@example.test'
+    waited = []
+
+    def finish_session():
+        assert not fake.locked
+        waited.append(True)
+        return True
+
+    def fail_commit(*args):
+        raise sqlite3.OperationalError('fixture failed during launch commit')
+
+    fake.finish_session = finish_session
+    monkeypatch.setattr(Controller, '_commit_launch', staticmethod(fail_commit))
+    args = ('start', 'another task', '--account', 'main') if command == 'start' else ('switch', 'T1', '--to', 'backup')
+    assert call(*args) == 1
+    assert waited == [True]
 
 
 def test_source_cannot_be_forced_into_account_switch(pool):

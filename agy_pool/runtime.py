@@ -196,8 +196,11 @@ class AgyRuntime:
         env = {key: value for key, value in os.environ.items() if not key.upper().startswith('AGY_POOL_')}
         env['AGY_STATUS_STATE'] = str(probe)
         child = self._spawn(cwd, env)
-        if child.wait() != 0:
+        if self._wait_interactive(child) != 0:
             raise RuntimeIssue('临时 agy 会话异常退出。请检查 agy 和 HUD 后重试。')
+
+    def _wait_interactive(self, child) -> int:
+        return child.wait()
 
     def guide_account_switch(self, cwd: Path, expected_hint: str, probe: Path) -> None:
         print(f'请在临时 agy 窗口输入 /logout，浏览器登录 {expected_hint}，再用 /exit 退出。', flush=True)
@@ -226,7 +229,12 @@ class AgyRuntime:
         return subprocess.Popen(argv, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
     def launch_agy(self, cwd: Path, env: dict[str, str], prompt: str | None, on_started) -> AgyProcess:
-        child = self._spawn(cwd, env, prompt)
+        return self._confirm_launch(self._spawn(cwd, env, prompt), on_started)
+
+    def finish_session(self) -> bool:
+        return False
+
+    def _confirm_launch(self, child, on_started) -> AgyProcess:
         stamp = self.process_creation(child.pid)
         if stamp is None:
             raise RuntimeIssue('agy 启动即退出。请检查安装或登录状态后重试。')
@@ -254,6 +262,14 @@ class AgyRuntime:
             return status.stdout, diff.stdout if diff.returncode == 0 else ''
         except (OSError, subprocess.TimeoutExpired):
             return None, ''
+
+
+def default_runtime() -> AgyRuntime:
+    if sys.platform == 'darwin':
+        from .runtime_macos import MacAgyRuntime
+
+        return MacAgyRuntime()
+    return AgyRuntime()
 
 
 def new_probe(home, prefix: str) -> Path:

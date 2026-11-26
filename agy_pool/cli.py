@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .handoff import AnchorTooLong, HandoffBuilder
-from .runtime import AgyRuntime, Identity, RuntimeIssue, new_probe, segment_conversation
+from .runtime import Identity, RuntimeIssue, default_runtime, new_probe, segment_conversation
 from .store import PoolStore, SensitiveData, StoreError, guard, redact, utc_now, write_text_atomic
 
 
@@ -20,7 +20,7 @@ _CONVERSATION = re.compile(r'[A-Za-z0-9_-]{1,128}', re.ASCII)
 
 
 def _parser():
-    p = argparse.ArgumentParser(prog='agy-pool', description='在 Windows 上管理 agy 任务与会话交接。')
+    p = argparse.ArgumentParser(prog='agy-pool', description='在 Windows 和 macOS 上管理 agy 任务与会话交接。')
     commands = p.add_subparsers(dest='command', required=True)
     commands.add_parser('init', help='初始化本地状态库')
     account = commands.add_parser('account', help='管理账号槽位').add_subparsers(dest='action', required=True)
@@ -290,7 +290,7 @@ class Controller:
                 self._reserve_launch(tx, tid, segment_id, 1, args.account, None, None)
                 tx.record_event('thread_start', thread_id=tid, segment_id=segment_id, account_id=args.account)
             proc = self._launch(tid, segment_id, 1, args.account, cwd)
-        print(f'已启动 {tid} · {args.account} · #1（PID {proc.pid}）。')
+        print(f'已启动 {tid} · {args.account} · #1（PID {proc.pid}）。', flush=True)
 
     @staticmethod
     def _reserve_launch(tx, tid, sid, seq, account, parent, bundle):
@@ -505,7 +505,7 @@ class Controller:
                 self._mark_auth(tx, args.to)
                 self._reserve_launch(tx, tid, new_id, seq, args.to, sid, bundle)
             proc = self._launch(tid, new_id, seq, args.to, cwd, parent=sid, bundle=bundle)
-        print(f'已启动 {tid} · {args.to} · #{seq}（PID {proc.pid}）。')
+        print(f'已启动 {tid} · {args.to} · #{seq}（PID {proc.pid}）。', flush=True)
 
     def handoff(self, args):
         with self.runtime.switch_lock(self._mutex_name()):
@@ -597,7 +597,18 @@ def main(argv=None, *, runtime=None) -> int:
         if args.command == 'init':
             print(f'状态库已就绪：{redact(str(store.home))}')
         else:
-            getattr(Controller(store, runtime if runtime is not None else AgyRuntime()), args.command)(args)
+            controller = Controller(store, runtime if runtime is not None else default_runtime())
+            command = getattr(controller, args.command)
+            if args.command in ('start', 'switch'):
+                try:
+                    command(args)
+                finally:
+                    # The controller's locks are released before waiting on the terminal owner.
+                    waited = controller.runtime.finish_session()
+                if waited:
+                    controller.reconcile()
+            else:
+                command(args)
         return 0
     except KeyboardInterrupt:
         print('已中断；若已冻结交接包，可重跑 switch 或执行 switch --cancel。一直打开的临时窗口请手动 /exit。', file=sys.stderr)

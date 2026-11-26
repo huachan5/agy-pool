@@ -1,6 +1,6 @@
 # agy-pool — Antigravity CLI 双 Gemini 账号池与无缝接力控制器
 
-> 当前状态：**M1/M2 本地实现**。真实浏览器换号和完整接力在 M4 验收；HUD 徽章与默认 8% 提醒属于 M3。
+> 当前状态：**Windows M1/M2；macOS 预览，待真机验收**。HUD 徽章与默认 8% 提醒属于 M3；真实浏览器换号和完整接力在 M4 验收。
 
 ## 简介
 
@@ -26,6 +26,20 @@
 - `agy-pool handoff T1 --transcript <路径>` 可在 HUD 未关联日志时指定来源。自动定位时只保存对话 ID，不锁死本机日志路径。探针放在对应库的数据目录；当前 HUD 会把邮箱写入临时状态，`agy-pool` 不把明文邮箱写进数据库或交接包。
 - 多个库可以使用同一基础 `AGY_POOL_HOME`，自定义库会使用 `pools/` 下各自的目录。不同 Windows 登录会话不共享该互斥锁。
 - `py -3.12 -m pytest -q` 使用隔离目录和模拟登录；不改真实账号、真实数据库或用户 PATH。
+
+## macOS 预览
+
+需要 Python 3.12（命令为 `python3.12`）、PATH 中的 `agy`，以及能写 `AGY_STATUS_STATE` 的现有 `agy-hud`。在本机终端运行，不需要安装器或授权终端自动化：
+
+```sh
+sh /path/to/agy-pool/agy-pool.sh init
+sh /path/to/agy-pool/agy-pool.sh account add main --from-current
+sh /path/to/agy-pool/agy-pool.sh start '重构登录鉴权' --account main
+```
+
+在 Mac 上，引导、校验和正式会话都在**当前终端**依次运行，每个 `agy` 会话用 `/exit` 结束。用另一个终端可执行 `list --json` 或 `handoff`；只要源会话还活着就不能换号。默认换号锁对同一 macOS 用户的不同终端和不同数据库生效。
+
+这条开发分支是预览，仍需在 Mac 真机验证系统接口和 Google 登录接力。[macOS 验收清单](docs/agy-pool-macos.md)列了实际测试步骤。
 
 ## 文档索引
 
