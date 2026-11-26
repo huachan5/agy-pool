@@ -1,6 +1,6 @@
 # agy-pool — Antigravity CLI 双 Gemini 账号池与无缝接力控制器
 
-> 当前状态：**v2.1 技术方案定稿 · GPT/Codex 直接编码就绪（M0 预研已完成，准备进入 M1+M2 开发）**
+> 当前状态：**v2.2 技术方案定稿 · GPT/Codex 直接编码就绪（M0 预研已完成，已闭环 M2 三大并发/校验/日志边界，准备进入 M1+M2 开发）**
 
 ## 简介
 
@@ -14,7 +14,7 @@
 ## 文档索引
 
 - 产品需求文档（PRD v1.2）：[docs/agy-pool-PRD.md](docs/agy-pool-PRD.md)
-- 详细技术方案（**v2.1** · SQLite WAL + 4 深模块 + M0 结论 + GPT 编码契约）：[docs/agy-pool-技术方案.md](docs/agy-pool-技术方案.md)
+- 详细技术方案（**v2.2** · SQLite WAL + 4 深模块 + M0 结论 + M2 缺口闭环）：[docs/agy-pool-技术方案.md](docs/agy-pool-技术方案.md)
 - 界面与 CLI 交互原型图（PNG + 7 张 SVG）：[docs/agy-pool-原型图/](docs/agy-pool-原型图/)
 - 测试用例规范（v1.0 黑盒场景参考，Markdown）：[docs/agy-pool-test-cases.md](docs/agy-pool-test-cases.md)
 - 测试用例导入表（v1.0 黑盒场景参考，CSV）：[docs/agy-pool-test-cases.csv](docs/agy-pool-test-cases.csv)

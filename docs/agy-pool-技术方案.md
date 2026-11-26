@@ -2,18 +2,19 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | **v2.1**（2026-11-26，GPT/Codex 直接编码就绪版） |
+| 版本 | **v2.2**（2026-11-26，补齐 M2 三大设计缺口：独立换号探针 / 全流程换号租约 / M2 日志回填与验收边界） |
 | 对齐基线 | [agy-pool-PRD.md](agy-pool-PRD.md)（v1.2：FR-01~FR-14、NFR-01~NFR-07、AC-01~AC-15） |
 | 技术栈 | **纯 Python 3.12 标准库、零第三方依赖**（与 `agy-hud` 保持一致） |
 | 测试框架 | `pytest` + `unittest` |
 
-### 修订记录（v1.0 → v2.1 演进摘要）
+### 修订记录（v1.0 → v2.2 演进摘要）
 
 | 版本 | 核心演进 |
 |---|---|
 | v1.0 | `state.json` + 手写 `state.lock` + `live/*.json` 分片合并 + `events.jsonl`，6 模块 + 4 个抽象适配器，含多项初稿预设 |
 | v2.0 | ① **存储瘦身**：单库 `pool.db`（标准库 `sqlite3` + WAL + 5s `busy_timeout`）取代文件锁与分片合并，并发与崩溃恢复由引擎原生保障；<br>② **模块收敛**：6 模块收敛为 **4 个深模块**（`store.py` / `handoff.py` / `runtime.py` / `cli.py`），消除 Phase 1 过早抽象；<br>③ **对齐 PRD v1.2**：补齐 `email_hash`、全量 `agy.exe` 枚举（托管+非托管）与 `(pid, create_time)` 防复用、源会话存活硬拦截、前置账号校验、600 Token 锚点门禁、HUD 告警优先级与三态文案；<br>④ **M0 预研落盘**：见 [§15 M0 预研实测结论](#15-m0-预研实测结论) |
-| **v2.1** | 新增 **§0 Agent / GPT 编码执行契约**（锁定权威优先级、Q1~Q5 拍板结论与 M1+M2 分工边界）、**§5.5 上游数据真实格式样本**（`transcript.jsonl` / `status-state.json` / `task.md`）、**§8 CLI 参数、退出码与 `--json` 输出契约** |
+| v2.1 | 新增 **§0 Agent / GPT 编码执行契约**、**§5.5 上游数据真实格式样本**、**§8 CLI 参数、退出码与 `--json` 输出契约** |
+| **v2.2** | 补齐 M2 开工前评审发现的 3 个关键设计缺口：新增 **§4.4 全局换号流程互斥租约**、**§4.5 换号窗口独立状态探针与 Fail-Closed 校验**、**§4.6 会话日志绑定机制（`seg-<id>.json` 探针 + `--transcript`）与 M2/M3 验收边界** |
 
 ---
 
@@ -22,7 +23,7 @@
 > 若本仓库交给 GPT / Codex 等自动化编程 Agent 实施，请严格遵守以下 3 条边界，无需反问确认：
 
 1. **权威优先级与旧文档隔离**：
-   - 规格冲突时优先级：**`agy-pool-技术方案.md`（v2.1） > `agy-pool-PRD.md`（v1.2）**；
+   - 规格冲突时优先级：**`agy-pool-技术方案.md`（v2.2） > `agy-pool-PRD.md`（v1.2）**；
    - `docs/agy-pool-test-cases.md`（及 `.csv`）为基于 v1.0（`state.json`）编制的黑盒场景参考，**严禁**在编码或编写 `pytest` 时混用 `state.json` / `state.lock` / `live/*.json` / 多 Adapter 套壳，所有持久化与模块划分一律以本文档 **SQLite WAL `pool.db` + 4 模块**为准。
 2. **已敲定决策（锁死 PRD §12 Q1~Q5）**：
    - `Q1 = A`：引导式官方换号（`/logout` + 浏览器 OAuth 登录）；
@@ -124,6 +125,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 -- 初始键：schema_version='1', active_machine_account='', next_thread_seq='1'
+-- 运行时租约键：active_switch_lease = JSON({"switch_id", "thread_id", "from_account", "to_account", "owner_pid", "owner_pid_create_time", "started_at"})（空闲时删除或置空）
 
 CREATE TABLE IF NOT EXISTS accounts (
     account_id          TEXT PRIMARY KEY,
@@ -232,39 +234,77 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
        (新段 seg(N+1) 走同一生命周期，handoff_in_path 指向 seg(N) 的交接包)
 ```
 
-### 4.3 两阶段切号、并发拦截与前置账号校验时序图
+### 4.3 两阶段切号、全局互斥租约与独立探针校验时序图
 ```text
-用户终端           agy-pool (cli.py)           PoolStore (pool.db)       AgyRuntime (OS/引导)       新 agy + agy-hud
+用户终端           agy-pool (cli.py)           PoolStore (pool.db)       AgyRuntime (OS/引导)       新 agy + 探针
    │                      │                           │                         │                        │
    │ switch --to backup   │                           │                         │                        │
    ├─────────────────────►│                           │                         │                        │
-   │                      │ 1. reconcile: 探活已知段 + 全量扫描本机 agy.exe ─────►│                        │
-   │                      │    ├─ 源段仍 running ─► 仅冻结交接包，提示先 /exit 退出 (FR-08, AC-13)        │
+   │                      │ 0. [Acquire Lease] BEGIN IMMEDIATE 抢占 meta['active_switch_lease']          │
+   │                      │    ├─ 他窗口正换号(PID存活) ─► 退出码 3 拦截                                  │
+   │                      │    └─ 死进程残留租约       ─► 自动回收 + 写 switch_lease_reclaimed            │
+   │                      │                                                                              │
+   │                      │ 1. reconcile + 日志回填: 探活已知段 + 扫描全机 agy.exe + 读 seg-<id>.json 回填日志 │
+   │                      │    ├─ 源段仍 running ─► 仅冻结交接包，提示先 /exit (退出码 6, FR-08)          │
    │                      │    └─ 发现其他存活 agy (托管/非托管) 且未 --force(yes) ─► 退出码 3 拦截 (FR-09)│
    │                      │                                                                              │
    │                      │ 2. [Phase 1: Freeze]                                                         │
    │                      │    生成 handoffs/T1-seg1.md (≤3500 Tokens, 已脱敏)                            │
    │                      │    事务置 seg1=handoff_pending + 写 events ────────►│                        │
    │                      │                                                                              │
-   │                      │ 3. [Phase 2: Guided Switch & Pre-flight Auth Check]                          │
-   │                      │    记录 switch_started_at，启动临时引导会话或提示 ────►│                        │
+   │                      │ 3. [Phase 2: Guided Switch (独立探针隔离)]                                   │
+   │                      │    记录 switch_started_at，注入 AGY_STATUS_STATE=.../probes/auth-<sid>.json  │
    │◄─────────────────────┼─ 提示: ① /logout ② 浏览器登录 backup ③ /exit 返回 ──│                        │
    │  登录完毕 /exit      │                                                                              │
    ├─────────────────────►│                                                                              │
-   │                      │ 4. 拉起下一棒前校验实际登录账号 (FR-10, AC-08):                               │
-   │                      │    读 status-state.json(ts > switch_started_at) 兜底调 GetUserStatus          │
-   │                      │    比对 email_hash == accounts['backup'].email_hash                           │
-   │                      │    ├─ 不匹配 ─► 原地拦截报错，允许重试或 switch --cancel (不浪费配额!)        │
-   │                      │    └─ 匹配   ─► 继续                                                         │
+   │                      │ 4. Fail-Closed 校验 (FR-10, 禁用共享 status-state.json):                     │
+   │                      │    仅读取 auth-<sid>.json: 需存在 & ts>=switch_started_at & email非空 & 哈希匹配│
+   │                      │    ├─ 缺失/过期/email空 ─► 退出码 1 拦截，禁起下一棒 (finally 清理探针)      │
+   │                      │    ├─ 哈希不匹配       ─► 退出码 4 拦截，提示重试或 --cancel                 │
+   │                      │    └─ 校验通过         ─► 删除 auth-<sid>.json，继续                         │
    │                      │                                                                              │
    │                      │ 5. [Phase 3: Launch & Commit]                                                │
+   │                      │    注入 AGY_POOL_THREAD_ID / AGY_POOL_SEGMENT_ID / AGY_POOL_ACCOUNT            │
+   │                      │         AGY_STATUS_STATE = ~/.antigravity/probes/seg-T1-seg2.json            │
    │                      │    拉起 agy -i "<≤250字单行短指令指向 T1-seg1.md>" ──────────────────────────►│
-   │                      │    注入 ENV: AGY_POOL_THREAD_ID / AGY_POOL_SEGMENT_ID / AGY_POOL_ACCOUNT       │
-   │                      │    等待 3s 存活检查:                                                           │
+   │                      │    等待 3s 存活检查，finally 释放 active_switch_lease:                       │
    │                      │    ├─ 3s 内闪退 ─► seg2=failed, seg1 回退 closed, 保留交接包                   │
    │                      │    └─ 存活成功  ─► 事务: seg1=handed_off, seg2=running, active_account=backup  │
-   │                      │◄──────────────────────────┤                         │   HUD 写回 conv_id     │
+   │                      │◄──────────────────────────┤                         │   HUD 写回 seg-T1-seg2.json│
 ```
+
+### 4.4 全局换号流程互斥租约（解决“双窗口同时发起换号”）
+- **问题背景**：SQLite 的 `busy_timeout` 只序列化毫秒级的数据库读写，无法让跨越“退出 → 浏览器登录 → 校验”的长流程排队；在本机单登录态下，两个终端同时发起 `switch` 会互相踢掉登录态。
+- **租约机制**：
+  1. 进入 `switch` 任何修改前，在单次 `BEGIN IMMEDIATE` 事务中抢占 `meta['active_switch_lease']`（持库锁 `< 2ms`，逻辑租约覆盖整个换号长流程），记录 JSON：
+     `{"switch_id": "<uuid>", "thread_id": "T1", "from_account": "main", "to_account": "backup", "owner_pid": 12345, "owner_pid_create_time": 1344..., "started_at": "..."}`。
+  2. 若已有租约且 `is_process_alive(owner_pid, owner_pid_create_time)` 为真（且非本进程），直接以**退出码 `3`**拒绝，清晰输出当前正在换号的线程、账号与 PID。
+  3. 若租约持有进程已死（强杀/断电），自动回收过期租约并向 `events` 写入 `switch_lease_reclaimed`。
+  4. 整个 `switch` 流程包在 `try ... finally` 中；无论正常完成、账号不符、`--cancel`、异常还是 `Ctrl+C`，都在 `finally` 中按 `switch_id` 做 CAS 释放租约。
+
+### 4.5 换号窗口独立状态探针与 Fail-Closed 校验（解决“共享状态文件认错账号”）
+- **问题背景**：所有未隔离的 `agy` 窗口都会把状态写入同一个 `~/.antigravity/status-state.json`；一旦旧窗口仍在刷新，极易把旧窗口的 `email` 误判成刚换好号的新账号。
+- **隔离方案（零改动现有 `agy-hud`）**：
+  - 实测现有 `agy-hud/hud.py` 第 46 行已原生支持读取环境变量 `AGY_STATUS_STATE`。
+  - `runtime.guide_account_switch()` 拉起临时引导换号 `agy` 窗口时，必须注入**本次换号专属探针路径**：`AGY_STATUS_STATE = ~/.antigravity/probes/auth-<switch_id>.json`（置于 `~/.antigravity/probes/` 而非 `pool.db` 内，与其他运行中的 `agy` 窗口完全物理隔离）。
+- **Fail-Closed 严格校验规则**：
+  - 临时换号窗口退出后，**严禁**回退读取全局 `status-state.json`，**仅**读取 `probes/auth-<switch_id>.json`（测试环境下支持通过注入读取器模拟）；
+  - 必须同时满足 3 个条件才算通过：① 探针文件存在且 JSON 合法；② `timestamp >= switch_started_at`；③ `email` 非空且计算出的 `email_hash == target.email_hash`。
+  - **任一条件不满足一律禁止启动下一棒**：`email_hash` 不匹配返回**退出码 `4`**；探针文件缺失、过期、JSON 损坏或 `email` 为空返回**退出码 `1`**，并明确提示用户重试或执行 `switch --cancel`。
+  - 无论校验成败，在 `finally` 中立即删除 `auth-<switch_id>.json`，确保明文邮箱不在磁盘滞留。
+
+### 4.6 会话日志绑定机制与 M2 / M3 验收边界（解决“M2 启动下一棒没带对话”）
+- **问题背景**：`HandoffBuilder` 需要 `transcript.jsonl` 才能抽取 L2 对话精华；若把 `conversation_id` / `transcript_path` 回填完全推迟到 M3（改造 `agy-hud`），M2 真机跑起来只能打出缺对话的半成品交接包。
+- **M2 零侵入日志绑定（直接复用现有 `agy-hud` 能力）**：
+  1. `start` 与 `switch` 拉起托管 `agy` 时，为每棒注入专属段探针环境变量：`AGY_STATUS_STATE = ~/.antigravity/probes/seg-<segment_id>.json`（现有未改动的 `agy-hud` 每次渲染会自动把 `session_id` 即 `conversation_id` 写入该文件）。
+  2. 执行 `handoff` 或 `switch` 冻结交接包前，若 `segments.transcript_path` 仍为空，按以下优先级自动回填并落库：
+     - ① 若用户显式传入 `--transcript <path>`（逃生舱与自动化测试入口），直接使用；
+     - ② 否则读取 `probes/seg-<segment_id>.json` 的 `session_id`，按确定性路径依次探测 `~/.gemini/<app_dir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`（`<app_dir>` 依次为 `antigravity-cli`、`antigravity`、`antigravity-ide`），存在即回填 `conversation_id` 与 `transcript_path` 到 `segments` 表。
+  3. 当段进入 `closed` 或 `handed_off` 且已完成回填时，顺带清理对应的 `seg-<segment_id>.json`；若本机未启用 `agy-hud` 且未传 `--transcript`，则降级为仅 L1 交接包，并输出**显式黄色警告**（说明缺失对话原因及通过 `--transcript` 或安装 `agy-hud` 解决）。
+- **明确里程碑验收边界**：
+  - **M2 验收范围**：CLI 全命令、全局换号租约互斥、独立探针 Fail-Closed 防错号、以及在已启用现有 `agy-hud` 环境下通过 `seg-<segment_id>.json` 自动回填 `transcript_path` 生成完整 L1+L2+L3 交接包（未启用 HUD 时仅验收命令、保护机制与黄色降级警告）；
+  - **M3 验收范围**：升级 `agy-hud` 实现实时线程徽章、配额直写 `pool.db`、低额三态提醒与运行中账号不符红警；
+  - **M4 验收范围**：双窗口真机全流程接力验收。
 
 ---
 
@@ -401,8 +441,8 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 | `agy-pool account remove` | `<id>` | 移除未绑定活跃线程的账号槽位 |
 | `agy-pool start` | `<title> --account <id> [--anchor-text <text> \| --anchor-file <path>] [--cwd <dir>]` | 校验锚点 ≤ 600 Tokens，创建线程与 `#1` 段并拉起托管 `agy` |
 | `agy-pool anchor edit` | `[<tid>] [--text <text> \| --file <path>]` | 编辑或替换线程锚点，保存前强制校验 ≤ 600 Tokens |
-| `agy-pool handoff` | `[<tid>]` | 仅生成/预览三层交接包 `handoffs/<tid>-seg<N>.md`，不触发换号 |
-| `agy-pool switch` | `[<tid>] --to <account_id> [--force] [--cancel]` | 两阶段切号；`--cancel` 回滚 `handoff_pending`；`--force` 须交互输入 `yes` |
+| `agy-pool handoff` | `[<tid>] [--transcript <path>]` | 仅生成/预览三层交接包 `handoffs/<tid>-seg<N>.md`，不触发换号（支持手动指定日志覆盖） |
+| `agy-pool switch` | `[<tid>] --to <account_id> [--transcript <path>] [--force] [--cancel]` | 两阶段切号（带全局租约互斥 + 独立探针校验）；`--cancel` 回滚；`--force` 须交互输入 `yes` |
 | `agy-pool status` | `[<tid>] [--json]` | 查看当前（或指定）线程详情、最新棒次及双槽位余量 |
 | `agy-pool list` | `[--all] [--json]` | 列出活跃线程与账号池总览；`--all` 包含已 `closed` 线程 |
 | `agy-pool close` | `[<tid>]` | 将线程标记为 `closed`（保留文件与历史，从默认视图隐藏） |
@@ -411,16 +451,16 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 ### 8.2 环境变量约定
 - **`AGY_POOL_HOME`**：运行时根目录覆盖（默认 `~/.antigravity/agy-pool`）
 - **`AGY_POOL_DB`**：SQLite 库文件路径覆盖（默认 `$AGY_POOL_HOME/pool.db`）
-- **`AGY_STATUS_STATE`**：AGY 状态文件路径覆盖（默认 `~/.antigravity/status-state.json`）
+- **`AGY_STATUS_STATE`**：AGY 状态文件路径覆盖（默认 `~/.antigravity/status-state.json`）。`account add --from-current` 读取当前 `AGY_STATUS_STATE`；而 `agy-pool` 拉起临时换号窗口时会强注入隔离路径 `~/.antigravity/probes/auth-<switch_id>.json`，拉起托管段时会注入 `~/.antigravity/probes/seg-<segment_id>.json`
 - **`AGY_POOL_THREAD_ID` / `AGY_POOL_SEGMENT_ID` / `AGY_POOL_ACCOUNT`**：托管启动 `agy` 时自动注入到子进程环境变量中，供子窗口 `agy-hud` 与子终端命令识别身份。
 
 ### 8.3 固定退出码表
 | 退出码 | 含义 | 典型触发场景 |
 |---:|---|---|
 | `0` | 成功 | 命令正常完成 |
-| `1` | 运行期 / IO / 拉起异常 | `pool.db` 损坏或版本过高、`agy` 拉起后 3s 内闪退、锁等待超时 |
+| `1` | 运行期 / IO / 拉起异常 | `pool.db` 损坏或版本过高、`agy` 拉起后 3s 内闪退、锁等待超时、**独立换号探针缺失/过期/不可读（Fail-Closed 拒绝启动下一棒）** |
 | `2` | 参数或校验失败 | 空标题、未注册账号槽位、`--to` 与当前账号相同、未指定 `<tid>` 且当前目录有多个活跃线程歧义 |
-| `3` | 并发冲突拦截 | 检测到其他存活 `agy.exe`（托管或非托管）且未 `--force` 确认（对齐 PRD 原型 05） |
+| `3` | 并发冲突拦截 | 检测到其他存活 `agy.exe`（托管或非托管）且未 `--force` 确认（对齐 PRD 原型 05），或**另一终端正持有活跃 `active_switch_lease` 换号租约** |
 | `4` | 账号一致性校验失败 | 引导换号后实际登录账号 `email_hash` 与目标槽位不符（FR-10） |
 | `5` | 锚点超限 | `start` / `anchor edit` 时锚点内容估算超过 `600 Tokens`（FR-02 / AC-12） |
 | `6` | 源会话仍存活禁切号 | 源段仍处于 `running` 状态，仅冻结交接包并提示先 `/exit`（FR-08 / AC-13） |
