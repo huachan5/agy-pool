@@ -29,7 +29,7 @@
    - **单机轻量定位**：多机场景采用各自独立安装，账号额度由 Google 云端自动同步，**不做**跨机状态同步。
 2. **已敲定决策（锁死 PRD §12 Q1~Q5）**：
    - `Q1 = A`：引导式官方换号（`/logout` + 浏览器 OAuth 登录）；
-   - `Q2 = 15%`：HUD 低额度预警阈值默认 `15%`；
+   - `Q2 = 8%`：HUD 低额度预警阈值默认 `8%`；
    - `Q3 = 默认拦截`：切号前扫描所有存活 `agy.exe`（托管 + 非托管）并默认拦截（`--force` 需交互输入 `yes`）；
    - `Q4 = 600 Tokens`：锚点内容硬上限 `600 Tokens`；
    - `Q5 = 永久保留`：Phase 1 交接包永久保留，不做自动清理 `gc`。
@@ -385,7 +385,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 "pool": {
   "enabled": true,
   "showThreadBadge": true,
-  "lowQuotaThresholdPercent": 15,
+  "lowQuotaThresholdPercent": 8,
   "syncLiveTelemetry": true,
   "liveSyncIntervalSeconds": 5
 }
@@ -402,7 +402,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 4. **第 1 行徽章（`render_project_line()`）**：在 `[Model]` 徽章后追加青绿色 `[T1·main·#1]`。
 5. **第 2 行尾部告警（`render_usage_segment()`，严格按优先级互斥展示）**：
    - **优先级 1（红色，FR-10）**：若 `stdin.email` 计算出的哈希与当前槽位 `email_hash` 不一致 → `⚠ 账号不符：实际 a***@gmail.com`；
-   - **优先级 2（橙色，FR-06 三态）**：若当前账号 `gemini-5h` 剩余 `<= lowQuotaThresholdPercent`（默认 `15%`），选择备用槽位按三态渲染：
+   - **优先级 2（橙色，FR-06 三态）**：若当前账号 `gemini-5h` 剩余 `<= lowQuotaThresholdPercent`（默认 `8%`），选择备用槽位按三态渲染：
      - 有快照且未过重置时间：`⚠ 建议切换 backup（94%·2h前）`
      - 快照记录的 `gemini_5h_reset_at <= now`：`⚠ 建议切换 backup（已重置）`
      - 备用槽位从未记录过配额：`⚠ 建议切换 backup（未知余量）`
