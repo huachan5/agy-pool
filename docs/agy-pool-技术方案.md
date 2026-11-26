@@ -2,29 +2,31 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | **v2.2**（2026-11-26，补齐 M2 三大设计缺口：独立换号探针 / 全流程换号租约 / M2 日志回填与验收边界） |
+| 版本 | **v2.3**（2026-11-26，最终编码定稿：相对路径去耦合 + 跨库 Win32 命名互斥体硬锁） |
 | 对齐基线 | [agy-pool-PRD.md](agy-pool-PRD.md)（v1.2：FR-01~FR-14、NFR-01~NFR-07、AC-01~AC-15） |
 | 技术栈 | **纯 Python 3.12 标准库、零第三方依赖**（与 `agy-hud` 保持一致） |
 | 测试框架 | `pytest` + `unittest` |
 
-### 修订记录（v1.0 → v2.2 演进摘要）
+### 修订记录（v1.0 → v2.3 演进摘要）
 
 | 版本 | 核心演进 |
 |---|---|
 | v1.0 | `state.json` + 手写 `state.lock` + `live/*.json` 分片合并 + `events.jsonl`，6 模块 + 4 个抽象适配器，含多项初稿预设 |
 | v2.0 | ① **存储瘦身**：单库 `pool.db`（标准库 `sqlite3` + WAL + 5s `busy_timeout`）取代文件锁与分片合并，并发与崩溃恢复由引擎原生保障；<br>② **模块收敛**：6 模块收敛为 **4 个深模块**（`store.py` / `handoff.py` / `runtime.py` / `cli.py`），消除 Phase 1 过早抽象；<br>③ **对齐 PRD v1.2**：补齐 `email_hash`、全量 `agy.exe` 枚举（托管+非托管）与 `(pid, create_time)` 防复用、源会话存活硬拦截、前置账号校验、600 Token 锚点门禁、HUD 告警优先级与三态文案；<br>④ **M0 预研落盘**：见 [§15 M0 预研实测结论](#15-m0-预研实测结论) |
 | v2.1 | 新增 **§0 Agent / GPT 编码执行契约**、**§5.5 上游数据真实格式样本**、**§8 CLI 参数、退出码与 `--json` 输出契约** |
-| **v2.2** | 补齐 M2 开工前评审发现的 3 个关键设计缺口：新增 **§4.4 全局换号流程互斥租约**、**§4.5 换号窗口独立状态探针与 Fail-Closed 校验**、**§4.6 会话日志绑定机制（`seg-<id>.json` 探针 + `--transcript`）与 M2/M3 验收边界** |
+| v2.2 | 补齐 M2 开工前评审发现的 3 个关键设计缺口：新增 **§4.4 全局换号流程互斥租约**、**§4.5 换号窗口独立状态探针与 Fail-Closed 校验**、**§4.6 会话日志绑定机制（`seg-<id>.json` 探针 + `--transcript`）与 M2/M3 验收边界** |
+| **v2.3** | **最终编码定稿**：① `pool.db` 内 `anchor_path` / `handoff_*_path` 统一存相对 `AGY_POOL_HOME` 的相对路径去耦合（`transcript_path` 优先按 `conversation_id` 动态定位）；② 新增跨 `AGY_POOL_DB` 的 Win32 命名互斥体硬锁 `Local\agy-pool-machine-switch-lock`；③ 明确多机各自独立安装、额度由 Google 云端自动同步，不做跨机状态同步 |
 
 ---
 
 ## 0. Agent / GPT 编码执行契约（必读）
 
-> 若本仓库交给 GPT / Codex 等自动化编程 Agent 实施，请严格遵守以下 3 条边界，无需反问确认：
+> 若本仓库交给 GPT / Codex 等自动化编程 Agent 实施，请严格遵守以下边界，无需反问确认：
 
 1. **权威优先级与旧文档隔离**：
-   - 规格冲突时优先级：**`agy-pool-技术方案.md`（v2.2） > `agy-pool-PRD.md`（v1.2）**；
+   - 规格冲突时优先级：**`agy-pool-技术方案.md`（v2.3） > `agy-pool-PRD.md`（v1.2）**；
    - `docs/agy-pool-test-cases.md`（及 `.csv`）为基于 v1.0（`state.json`）编制的黑盒场景参考，**严禁**在编码或编写 `pytest` 时混用 `state.json` / `state.lock` / `live/*.json` / 多 Adapter 套壳，所有持久化与模块划分一律以本文档 **SQLite WAL `pool.db` + 4 模块**为准。
+   - **单机轻量定位**：多机场景采用各自独立安装，账号额度由 Google 云端自动同步，**不做**跨机状态同步。
 2. **已敲定决策（锁死 PRD §12 Q1~Q5）**：
    - `Q1 = A`：引导式官方换号（`/logout` + 浏览器 OAuth 登录）；
    - `Q2 = 15%`：HUD 低额度预警阈值默认 `15%`；
@@ -144,7 +146,7 @@ CREATE TABLE IF NOT EXISTS threads (
     thread_id          TEXT PRIMARY KEY,
     title              TEXT NOT NULL,
     cwd                TEXT NOT NULL,
-    anchor_path        TEXT NOT NULL,
+    anchor_path        TEXT NOT NULL,       -- 一律存相对 AGY_POOL_HOME 的相对路径（如 'anchors/T1.md'），禁止硬编码绝对路径
     status             TEXT NOT NULL,       -- active / closed
     current_segment_id TEXT,
     segment_count      INTEGER NOT NULL DEFAULT 0,
@@ -159,9 +161,9 @@ CREATE TABLE IF NOT EXISTS segments (
     account_id          TEXT NOT NULL REFERENCES accounts(account_id),
     parent_segment_id   TEXT,
     conversation_id     TEXT,
-    transcript_path     TEXT,
-    handoff_in_path     TEXT,
-    handoff_out_path    TEXT,
+    transcript_path     TEXT,               -- 可留空；优先按 conversation_id 动态定位本机 ~/.gemini/<app_dir>/brain/<conv_id>/...，仅 --transcript 显式覆盖时记录
+    handoff_in_path     TEXT,               -- 相对 AGY_POOL_HOME 路径（如 'handoffs/T1-seg1.md'）
+    handoff_out_path    TEXT,               -- 相对 AGY_POOL_HOME 路径（如 'handoffs/T1-seg1.md'）
     pid                 INTEGER,
     pid_create_time     INTEGER,            -- Win32 FILETIME 64-bit 整数，防 PID 复用
     status              TEXT NOT NULL,      -- starting / running / closed / handoff_pending / handed_off / failed
@@ -273,14 +275,17 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
    │                      │◄──────────────────────────┤                         │   HUD 写回 seg-T1-seg2.json│
 ```
 
-### 4.4 全局换号流程互斥租约（解决“双窗口同时发起换号”）
-- **问题背景**：SQLite 的 `busy_timeout` 只序列化毫秒级的数据库读写，无法让跨越“退出 → 浏览器登录 → 校验”的长流程排队；在本机单登录态下，两个终端同时发起 `switch` 会互相踢掉登录态。
-- **租约机制**：
-  1. 进入 `switch` 任何修改前，在单次 `BEGIN IMMEDIATE` 事务中抢占 `meta['active_switch_lease']`（持库锁 `< 2ms`，逻辑租约覆盖整个换号长流程），记录 JSON：
-     `{"switch_id": "<uuid>", "thread_id": "T1", "from_account": "main", "to_account": "backup", "owner_pid": 12345, "owner_pid_create_time": 1344..., "started_at": "..."}`。
-  2. 若已有租约且 `is_process_alive(owner_pid, owner_pid_create_time)` 为真（且非本进程），直接以**退出码 `3`**拒绝，清晰输出当前正在换号的线程、账号与 PID。
-  3. 若租约持有进程已死（强杀/断电），自动回收过期租约并向 `events` 写入 `switch_lease_reclaimed`。
-  4. 整个 `switch` 流程包在 `try ... finally` 中；无论正常完成、账号不符、`--cancel`、异常还是 `Ctrl+C`，都在 `finally` 中按 `switch_id` 做 CAS 释放租约。
+### 4.4 全局换号流程互斥锁（机器级命名互斥体 + DB 诊断租约）
+- **问题背景**：SQLite 的 `busy_timeout` 只序列化毫秒级的数据库读写，无法让跨越“退出 → 浏览器登录 → 校验”的长流程排队；同时若两个终端通过 `AGY_POOL_DB` 指向不同数据库，仅靠 DB 内锁看不到彼此，但它们仍共享同一台机器的 Windows 登录态。
+- **双层互斥机制**：
+  1. **机器级硬锁（跨 `AGY_POOL_DB` 生效，`runtime.py`）**：
+     - 换号前优先调用 Win32 `kernel32.CreateMutexW(None, False, mutex_name)`（默认 `Local\agy-pool-machine-switch-lock`，支持环境变量 `AGY_POOL_SWITCH_MUTEX` 与 `FakeRuntime` 隔离测试）+ 非阻塞 `WaitForSingleObject(h, 0)`；
+     - 返回 `WAIT_TIMEOUT (0x102)` → 说明本机**任意终端**（无论 `AGY_POOL_DB` 指向何处）正在换号，直接以**退出码 `3`** 拦截；
+     - 返回 `WAIT_OBJECT_0 (0x0)` 或 `WAIT_ABANDONED (0x80)`（前序进程强杀/崩溃后由 OS 内核自动回收，**永无僵尸锁**）→ 获取成功，`finally` 中执行 `ReleaseMutex(h)` + `CloseHandle(h)`。
+  2. **DB 内诊断租约（同库详细诊断与审计，`store.py`）**：
+     - 获取机器级互斥体后，再在单次 `BEGIN IMMEDIATE` 事务中抢占 `meta['active_switch_lease']`（持库锁 `< 2ms`），记录 JSON：`{"switch_id": "<uuid>", "thread_id": "T1", "from_account": "main", "to_account": "backup", "owner_pid": 12345, "owner_pid_create_time": 1344..., "started_at": "..."}`。
+     - 若已有同库租约且 `is_process_alive(owner_pid, owner_pid_create_time)` 为真（且非本进程），以**退出码 `3`** 拒绝并输出正在换号的线程、账号与 PID；若持有进程已死则自动回收并写 `events(switch_lease_reclaimed)`。
+     - 整个 `switch` 包在 `try ... finally` 中；无论正常完成、账号不符、`--cancel`、异常还是 `Ctrl+C`，都在 `finally` 中按 `switch_id` 做 CAS 释放 DB 租约，并释放 Win32 命名互斥体。
 
 ### 4.5 换号窗口独立状态探针与 Fail-Closed 校验（解决“共享状态文件认错账号”）
 - **问题背景**：所有未隔离的 `agy` 窗口都会把状态写入同一个 `~/.antigravity/status-state.json`；一旦旧窗口仍在刷新，极易把旧窗口的 `email` 误判成刚换好号的新账号。
@@ -451,6 +456,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 ### 8.2 环境变量约定
 - **`AGY_POOL_HOME`**：运行时根目录覆盖（默认 `~/.antigravity/agy-pool`）
 - **`AGY_POOL_DB`**：SQLite 库文件路径覆盖（默认 `$AGY_POOL_HOME/pool.db`）
+- **`AGY_POOL_SWITCH_MUTEX`**：跨库机器级换号互斥体名称覆盖（可选，测试隔离用，默认 `Local\agy-pool-machine-switch-lock`）
 - **`AGY_STATUS_STATE`**：AGY 状态文件路径覆盖（默认 `~/.antigravity/status-state.json`）。`account add --from-current` 读取当前 `AGY_STATUS_STATE`；而 `agy-pool` 拉起临时换号窗口时会强注入隔离路径 `~/.antigravity/probes/auth-<switch_id>.json`，拉起托管段时会注入 `~/.antigravity/probes/seg-<segment_id>.json`
 - **`AGY_POOL_THREAD_ID` / `AGY_POOL_SEGMENT_ID` / `AGY_POOL_ACCOUNT`**：托管启动 `agy` 时自动注入到子进程环境变量中，供子窗口 `agy-hud` 与子终端命令识别身份。
 
@@ -460,7 +466,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 | `0` | 成功 | 命令正常完成 |
 | `1` | 运行期 / IO / 拉起异常 | `pool.db` 损坏或版本过高、`agy` 拉起后 3s 内闪退、锁等待超时、**独立换号探针缺失/过期/不可读（Fail-Closed 拒绝启动下一棒）** |
 | `2` | 参数或校验失败 | 空标题、未注册账号槽位、`--to` 与当前账号相同、未指定 `<tid>` 且当前目录有多个活跃线程歧义 |
-| `3` | 并发冲突拦截 | 检测到其他存活 `agy.exe`（托管或非托管）且未 `--force` 确认（对齐 PRD 原型 05），或**另一终端正持有活跃 `active_switch_lease` 换号租约** |
+| `3` | 并发冲突拦截 | 检测到其他存活 `agy.exe`（托管或非托管）且未 `--force` 确认（对齐 PRD 原型 05），或另一终端正持有 `active_switch_lease` / **机器级命名互斥体 `Local\agy-pool-machine-switch-lock`** |
 | `4` | 账号一致性校验失败 | 引导换号后实际登录账号 `email_hash` 与目标槽位不符（FR-10） |
 | `5` | 锚点超限 | `start` / `anchor edit` 时锚点内容估算超过 `600 Tokens`（FR-02 / AC-12） |
 | `6` | 源会话仍存活禁切号 | 源段仍处于 `running` 状态，仅冻结交接包并提示先 `/exit`（FR-08 / AC-13） |
@@ -506,7 +512,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
     "thread_id": "T1",
     "title": "重构登录鉴权",
     "cwd": "C:/Users/Administrator/Desktop/cspace",
-    "anchor_path": "C:/Users/Administrator/.antigravity/agy-pool/anchors/T1.md",
+    "anchor_path": "anchors/T1.md",
     "status": "active",
     "segment_count": 2
   },
@@ -517,7 +523,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
     "status": "running",
     "pid": 22108,
     "conversation_id": "a2eb9845-fe56-4112-b12b-5c0537ef48df",
-    "handoff_in_path": "C:/Users/Administrator/.antigravity/agy-pool/handoffs/T1-seg1.md"
+    "handoff_in_path": "handoffs/T1-seg1.md"
   },
   "accounts": [
     {"account_id": "main", "email_hint": "a***@gmail.com", "gemini_5h_remaining": 0.08},
