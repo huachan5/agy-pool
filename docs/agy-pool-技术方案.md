@@ -291,12 +291,14 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 - **问题背景**：所有未隔离的 `agy` 窗口都会把状态写入同一个 `~/.antigravity/status-state.json`；一旦旧窗口仍在刷新，极易把旧窗口的 `email` 误判成刚换好号的新账号。
 - **隔离方案（零改动现有 `agy-hud`）**：
   - 实测现有 `agy-hud/hud.py` 第 46 行已原生支持读取环境变量 `AGY_STATUS_STATE`。
-  - `runtime.guide_account_switch()` 拉起临时引导换号 `agy` 窗口时，必须注入**本次换号专属探针路径**：`AGY_STATUS_STATE = ~/.antigravity/probes/auth-<switch_id>.json`（置于 `~/.antigravity/probes/` 而非 `pool.db` 内，与其他运行中的 `agy` 窗口完全物理隔离）。
+  - `runtime.guide_account_switch()` 启动临时引导窗口时使用该库目录下的 `probes/guide-<uuid>.json`。此窗口的快照只用于隔离旧 HUD 输出，**不用于授权接棒**。
 - **Fail-Closed 严格校验规则**：
-  - 临时换号窗口退出后，**严禁**回退读取全局 `status-state.json`，**仅**读取 `probes/auth-<switch_id>.json`（测试环境下支持通过注入读取器模拟）；
-  - 必须同时满足 3 个条件才算通过：① 探针文件存在且 JSON 合法；② `timestamp >= switch_started_at`；③ `email` 非空且计算出的 `email_hash == target.email_hash`。
+  - 引导窗口退出后，另开不发送模型消息的校验窗口，为其注入一份新的 `AGY_STATUS_STATE` 指向该库目录下的 `probes/auth-<uuid>.json`；**严禁**回退读取全局 `status-state.json` 或引导窗口的探针。
+  - 必须同时满足 3 个条件才算通过：① 探针文件存在且 JSON 合法；② `timestamp` 有效且不早于校验窗口启动；③ `email` 非空且计算出的 `email_hash == target.email_hash`。
   - **任一条件不满足一律禁止启动下一棒**：`email_hash` 不匹配返回**退出码 `4`**；探针文件缺失、过期、JSON 损坏或 `email` 为空返回**退出码 `1`**，并明确提示用户重试或执行 `switch --cancel`。
   - 无论校验成败，在 `finally` 中立即删除 `auth-<switch_id>.json`，确保明文邮箱不在磁盘滞留。
+
+- **M2 实施补充**（见 [v2.3 增量用例](agy-pool-v2.3-acceptance.md)）：互斥范围为同一个 Windows 登录会话，不跨 Windows 用户会话；自定义库的锚点、交接包与临时探针均放在该库的独立数据目录。引导窗口退出后另起一个不发送模型消息的校验窗口，用其独立探针确认实际登录；引导窗口的记录不作授权依据。`start` 同样先校验，并与 `switch` 使用同一把锁。自动定位日志只回填 `conversation_id`，仅 `--transcript` 显式覆盖会保存路径。账号探针在正常退出路径清理；进程被强杀时不承诺 `finally` 执行。
 
 ### 4.6 会话日志绑定机制与 M2 / M3 验收边界（解决“M2 启动下一棒没带对话”）
 - **问题背景**：`HandoffBuilder` 需要 `transcript.jsonl` 才能抽取 L2 对话精华；若把 `conversation_id` / `transcript_path` 回填完全推迟到 M3（改造 `agy-hud`），M2 真机跑起来只能打出缺对话的半成品交接包。
@@ -304,7 +306,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
   1. `start` 与 `switch` 拉起托管 `agy` 时，为每棒注入专属段探针环境变量：`AGY_STATUS_STATE = ~/.antigravity/probes/seg-<segment_id>.json`（现有未改动的 `agy-hud` 每次渲染会自动把 `session_id` 即 `conversation_id` 写入该文件）。
   2. 执行 `handoff` 或 `switch` 冻结交接包前，若 `segments.transcript_path` 仍为空，按以下优先级自动回填并落库：
      - ① 若用户显式传入 `--transcript <path>`（逃生舱与自动化测试入口），直接使用；
-     - ② 否则读取 `probes/seg-<segment_id>.json` 的 `session_id`，按确定性路径依次探测 `~/.gemini/<app_dir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`（`<app_dir>` 依次为 `antigravity-cli`、`antigravity`、`antigravity-ide`），存在即回填 `conversation_id` 与 `transcript_path` 到 `segments` 表。
+     - ② 否则读取 `probes/seg-<segment_id>.json` 的 `session_id`，只回填 `conversation_id`。按 `antigravity-cli`、`antigravity`、`antigravity-ide` 的顺序在 `~/.gemini/<app_dir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl` 动态查找日志，避免持久化机器相关路径。
   3. 当段进入 `closed` 或 `handed_off` 且已完成回填时，顺带清理对应的 `seg-<segment_id>.json`；若本机未启用 `agy-hud` 且未传 `--transcript`，则降级为仅 L1 交接包，并输出**显式黄色警告**（说明缺失对话原因及通过 `--transcript` 或安装 `agy-hud` 解决）。
 - **明确里程碑验收边界**：
   - **M2 验收范围**：CLI 全命令、全局换号租约互斥、独立探针 Fail-Closed 防错号、以及在已启用现有 `agy-hud` 环境下通过 `seg-<segment_id>.json` 自动回填 `transcript_path` 生成完整 L1+L2+L3 交接包（未启用 HUD 时仅验收命令、保护机制与黄色降级警告）；
@@ -414,7 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 ### 7.1 里程碑计划
 - **M0 预研**：✅ 已完成（见 [§15](#15-m0-预研实测结论)）。
 - **M1 内核（`store.py` + `handoff.py`）**：SQLite WAL 5 表与迁移、零凭据守卫、600 Token 锚点校验、L1/L2/L3 交接包生成与 3,500 Token 裁剪、脱敏 → 对应 AC-06 / AC-11 / AC-12。
-- **M2 编排与 CLI（`runtime.py` + `cli.py` + `install.ps1`）**：Win32 `agy.exe` 全量枚举、`(pid, create_time)` 探活、`account add/list/remove`、`start`、`anchor edit`、`handoff`、`switch`（含 `--cancel` / `--force`）、`status`、`list`、`close`、`resume` → 对应 AC-01 / AC-02 / AC-05 / AC-08 / AC-09 / AC-13 / AC-14 / AC-15。
+- **M2 编排与 CLI（`runtime.py` + `cli.py` + `install.ps1`）**：Win32 `agy.exe` 全量枚举、`(pid, create_time)` 探活、`account add/list/remove`、`start`、`anchor edit`、`handoff`、`switch`（含 `--cancel` / `--force`）、`status`、`list`、`close`（`resume` 留到 Phase 2） → 对应 AC-01 / AC-02 / AC-05 / AC-08 / AC-09 / AC-13 / AC-14 / AC-15。
 - **M3 HUD 联动**：先 `git pull origin main` 同步 `agy-hud` 远端 `713dfd1`，再修改 `hud.py`、`config.json`、`install.ps1`、`test_hud.py` → 对应 AC-03 / AC-04 / AC-07 / AC-10 + 原有测试全绿。
 - **M4 真机演练**：双窗口并行 + `main → backup → main` 真实 `/logout` + OAuth 登录 + `agy -i` 全流程实测验收。
 
@@ -447,7 +449,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 | `agy-pool start` | `<title> --account <id> [--anchor-text <text> \| --anchor-file <path>] [--cwd <dir>]` | 校验锚点 ≤ 600 Tokens，创建线程与 `#1` 段并拉起托管 `agy` |
 | `agy-pool anchor edit` | `[<tid>] [--text <text> \| --file <path>]` | 编辑或替换线程锚点，保存前强制校验 ≤ 600 Tokens |
 | `agy-pool handoff` | `[<tid>] [--transcript <path>]` | 仅生成/预览三层交接包 `handoffs/<tid>-seg<N>.md`，不触发换号（支持手动指定日志覆盖） |
-| `agy-pool switch` | `[<tid>] --to <account_id> [--transcript <path>] [--force] [--cancel]` | 两阶段切号（带全局租约互斥 + 独立探针校验）；`--cancel` 回滚；`--force` 须交互输入 `yes` |
+| `agy-pool switch` | `[<tid>] (--to <account_id> [--transcript <path>] [--force] \| --cancel)` | 换号前后检查冲突；`--cancel` 仅回滚本地接棒状态，不更改 Google 登录；`--force` 须交互输入 `yes` |
 | `agy-pool status` | `[<tid>] [--json]` | 查看当前（或指定）线程详情、最新棒次及双槽位余量 |
 | `agy-pool list` | `[--all] [--json]` | 列出活跃线程与账号池总览；`--all` 包含已 `closed` 线程 |
 | `agy-pool close` | `[<tid>]` | 将线程标记为 `closed`（保留文件与历史，从默认视图隐藏） |

@@ -325,7 +325,7 @@ PS C:\Users\Administrator\Desktop\cspace> agy-pool list
 | AC-06 | 经历 `main → backup → main` | 生成第 3 份交接包 | L1 仍完整包含初始锚点全文 | FR-07 |
 | AC-07 | 同目录 `T1`、`T2` 同时运行 | 各自 HUD 渲染与写回 | 徽章、看板文件、交接包互不串台 | FR-03, FR-09 |
 | AC-08 | 换号时用户误登 `main` | 校验步骤 | 拒绝拉起并提示“实际登录 a***，期望 b***”，可重试/取消；运行中发现不符时 HUD 显示 `⚠ 账号不符` | FR-10 |
-| AC-09 | 已冻结交接包，用户 `Ctrl+C` | 再次 `switch` / `switch --cancel` | 状态文件完整；续接时复用已冻结交接包；取消时回到切号前状态 | FR-12 |
+| AC-09 | 已冻结交接包，用户 `Ctrl+C` | 再次 `switch` / `switch --cancel` | 状态文件完整；续接复用已冻结交接包；取消只回滚本地接棒状态、保留交接包，不更改 Google 登录账号 | FR-12 |
 | AC-10 | 原生 `agy` 启动，或状态文件缺失/损坏 | HUD 渲染 | 输出与改造前逐字节一致，无异常 | FR-04, NFR-02 |
 | AC-11 | 日志中混入 API Key / Bearer / OAuth Token | 生成交接包与写看板 | 全部替换为 `[REDACTED]`；状态文件键名守卫通过 | FR-07, NFR-01 |
 | AC-12 | 锚点内容超过 600 Tokens | `start` / `anchor edit` | 拒绝保存并提示当前 Token 数与上限 | FR-02 |
