@@ -1,5 +1,9 @@
 # `agy-pool` × `agy-hud` 测试用例规范（Phase 1 MVP）
 
+> [!WARNING]
+> **架构版本说明**：本文档编制于 v1.0（`state.json` + `state.lock` + `live/*.json`）阶段，**仅作黑盒业务场景与验收思路参考**。
+> 当前 v2.1 已演进为 **SQLite WAL 单库（`pool.db`）+ 4 深模块**，编写代码与 `pytest` 自动化测试时，存储结构与模块接口请一律以 [agy-pool-技术方案.md](agy-pool-技术方案.md)（v2.1）与 [agy-pool-PRD.md](agy-pool-PRD.md)（v1.2，AC-01~AC-15）为准。
+
 > **文档定位**：基于《`agy-pool` × `agy-hud` 双 Gemini 账号池与无缝接力 — 产品设计与技术方案（PRD）》编制的**确定性可执行测试用例集**。
 > 每条用例严格遵循五要素规范（**标题、前置条件、具体测试数据、离散单步操作、每步唯一可观测预期结果**），不含模糊预期词，可直接用于人工验收、TestRail 导入（配套 [agy-pool-test-cases.csv](agy-pool-test-cases.csv)）及 Phase 1 TDD 自动化测试编码。
 

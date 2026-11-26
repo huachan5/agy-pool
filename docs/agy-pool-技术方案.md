@@ -2,17 +2,37 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | **v2.0**（2026-11-26） |
+| 版本 | **v2.1**（2026-11-26，GPT/Codex 直接编码就绪版） |
 | 对齐基线 | [agy-pool-PRD.md](agy-pool-PRD.md)（v1.2：FR-01~FR-14、NFR-01~NFR-07、AC-01~AC-15） |
 | 技术栈 | **纯 Python 3.12 标准库、零第三方依赖**（与 `agy-hud` 保持一致） |
 | 测试框架 | `pytest` + `unittest` |
 
-### 修订记录（v1.0 → v2.0 架构瘦身摘要）
+### 修订记录（v1.0 → v2.1 演进摘要）
 
 | 版本 | 核心演进 |
 |---|---|
 | v1.0 | `state.json` + 手写 `state.lock` + `live/*.json` 分片合并 + `events.jsonl`，6 模块 + 4 个抽象适配器，含多项初稿预设 |
-| **v2.0** | ① **存储瘦身**：单库 `pool.db`（标准库 `sqlite3` + WAL + 5s `busy_timeout`）取代文件锁与分片合并，并发与崩溃恢复由引擎原生保障；<br>② **模块收敛**：6 模块收敛为 **4 个深模块**（`store.py` / `handoff.py` / `runtime.py` / `cli.py`），消除 Phase 1 过早抽象；<br>③ **对齐 PRD v1.2**：补齐 `email_hash`、全量 `agy.exe` 枚举（托管+非托管）与 `(pid, create_time)` 防复用、源会话存活硬拦截、前置账号校验、600 Token 锚点门禁、HUD 告警优先级与三态文案；<br>④ **M0 预研落盘**：见 [§15 M0 预研实测结论](#15-m0-预研实测结论) |
+| v2.0 | ① **存储瘦身**：单库 `pool.db`（标准库 `sqlite3` + WAL + 5s `busy_timeout`）取代文件锁与分片合并，并发与崩溃恢复由引擎原生保障；<br>② **模块收敛**：6 模块收敛为 **4 个深模块**（`store.py` / `handoff.py` / `runtime.py` / `cli.py`），消除 Phase 1 过早抽象；<br>③ **对齐 PRD v1.2**：补齐 `email_hash`、全量 `agy.exe` 枚举（托管+非托管）与 `(pid, create_time)` 防复用、源会话存活硬拦截、前置账号校验、600 Token 锚点门禁、HUD 告警优先级与三态文案；<br>④ **M0 预研落盘**：见 [§15 M0 预研实测结论](#15-m0-预研实测结论) |
+| **v2.1** | 新增 **§0 Agent / GPT 编码执行契约**（锁定权威优先级、Q1~Q5 拍板结论与 M1+M2 分工边界）、**§5.5 上游数据真实格式样本**（`transcript.jsonl` / `status-state.json` / `task.md`）、**§8 CLI 参数、退出码与 `--json` 输出契约** |
+
+---
+
+## 0. Agent / GPT 编码执行契约（必读）
+
+> 若本仓库交给 GPT / Codex 等自动化编程 Agent 实施，请严格遵守以下 3 条边界，无需反问确认：
+
+1. **权威优先级与旧文档隔离**：
+   - 规格冲突时优先级：**`agy-pool-技术方案.md`（v2.1） > `agy-pool-PRD.md`（v1.2）**；
+   - `docs/agy-pool-test-cases.md`（及 `.csv`）为基于 v1.0（`state.json`）编制的黑盒场景参考，**严禁**在编码或编写 `pytest` 时混用 `state.json` / `state.lock` / `live/*.json` / 多 Adapter 套壳，所有持久化与模块划分一律以本文档 **SQLite WAL `pool.db` + 4 模块**为准。
+2. **已敲定决策（锁死 PRD §12 Q1~Q5）**：
+   - `Q1 = A`：引导式官方换号（`/logout` + 浏览器 OAuth 登录）；
+   - `Q2 = 15%`：HUD 低额度预警阈值默认 `15%`；
+   - `Q3 = 默认拦截`：切号前扫描所有存活 `agy.exe`（托管 + 非托管）并默认拦截（`--force` 需交互输入 `yes`）；
+   - `Q4 = 600 Tokens`：锚点内容硬上限 `600 Tokens`；
+   - `Q5 = 永久保留`：Phase 1 交接包永久保留，不做自动清理 `gc`。
+3. **分工边界（先只做 M1 + M2）**：
+   - 外部 GPT / Codex 本次仅实现 **`agy-pool/` 独立包**（`store.py`、`handoff.py`、`runtime.py`、`cli.py`、`agy-pool.cmd`、`install.ps1` 及 `tests/` 全套 `pytest`）；
+   - **严禁修改 `agy-hud/` 目录**（M3 需先在本地 `agy-hud` 仓库执行 `git pull origin main` 合入远端 `713dfd1` 后单独对接实施）。
 
 ---
 
@@ -280,6 +300,33 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 你是任务线程 T1（重构登录鉴权）的第 2 棒接力助手。请先用 read_file 读取交接包 C:/Users/Administrator/.antigravity/agy-pool/handoffs/T1-seg1.md，用3-5条简短要点复述目标、已完成进度和下一步行动后继续推进，不要编造交接包或仓库外信息。
 ```
 
+### 5.5 上游数据真实格式样本（严禁猜测 OpenAI 格式）
+
+1. **`transcript.jsonl`（按 `step_index` 覆盖去重，不是 `{"role":"user","content":...}`）**：
+```jsonl
+{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T03:00:00Z", "content": "请重构登录鉴权模块并补单测"}
+{"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "IN_PROGRESS", "created_at": "2026-11-26T03:00:05Z", "model": "gemini-4-neon-high", "content": "思考草稿片段..."}
+{"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T03:00:10Z", "model": "gemini-4-neon-high", "content": "已完成 auth.py 中间件拆分", "tool_calls": [{"name": "edit_file", "args": {"Path": "C:/repo/auth.py"}}, {"name": "run_command", "args": {"CommandLine": "pytest", "toolSummary": "Run tests"}}]}
+{"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "ERROR", "created_at": "2026-11-26T03:00:12Z", "content": "AssertionError: token expired check failed"}
+```
+   - **解析规则**：同一 `step_index` 多次出现时以后者覆盖前者（流式增量最终态）；仅从 `type == "USER_INPUT"` 取用户指令，从 `type == "PLANNER_RESPONSE"` 取模型结论与 `tool_calls`（其中 `edit_file`/`write_file` 的 `args.Path` 提取为改动文件清单），从 `status == "ERROR"` 提取最近报错（每条截断 ≤ 300 字符）；`GENERIC` 中非 `ERROR` 的大段工具返回值全部丢弃。
+
+2. **`~/.antigravity/status-state.json`（支持 `AGY_STATUS_STATE` 环境变量覆盖）**：
+```json
+{
+  "email": "user@example.com",
+  "plan_tier": "Google AI Pro",
+  "session_id": "a2eb9845-fe56-4112-b12b-5c0537ef48df",
+  "model": "Gemini 4 Neon (High)",
+  "timestamp": 1795663800.12
+}
+```
+   - 读取后立即在内存中生成 `email_hint`（如 `u***@example.com`）与 `email_hash`（`hashlib.sha256(email.strip().lower().encode()).hexdigest()[:16]`），**绝不**将明文 `email` 写入 `pool.db` 或 `events`。
+
+3. **`brain/<conv_id>/task.md`（复选框解析正则）**：
+   - 正则：`^\s*(?:[-*+]|\d+\.)\s+\[([ xX/])\]\s+(.+)$`
+   - 状态映射：`x`/`X` → `completed`、`/` → `in_progress`、空格 → `pending`。
+
 ---
 
 ## 6. `agy-hud` 最小侵入式改造方案
@@ -339,6 +386,104 @@ CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
 ```powershell
 & "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe" -m pytest C:\Users\Administrator\Desktop\cspace\agy-pool\tests -v
 & "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe" -m unittest discover -s C:\Users\Administrator\Desktop\cspace\agy-hud -p "test_*.py" -v
+```
+
+---
+
+## 8. CLI 参数、退出码与 `--json` 输出契约
+
+### 8.1 子命令与参数规范
+| 命令 | 参数与可选项 | 说明 |
+|---|---|---|
+| `agy-pool init` | — | 初始化 `AGY_POOL_HOME` 目录与 `pool.db`（幂等，不覆盖已有数据） |
+| `agy-pool account add` | `<id> --from-current [--label <text>]` | 读取 `status-state.json` 当前账号，只存 `email_hint` + `email_hash` |
+| `agy-pool account list` | `[--json]` | 列出所有已注册账号槽位及配额快照 |
+| `agy-pool account remove` | `<id>` | 移除未绑定活跃线程的账号槽位 |
+| `agy-pool start` | `<title> --account <id> [--anchor-text <text> \| --anchor-file <path>] [--cwd <dir>]` | 校验锚点 ≤ 600 Tokens，创建线程与 `#1` 段并拉起托管 `agy` |
+| `agy-pool anchor edit` | `[<tid>] [--text <text> \| --file <path>]` | 编辑或替换线程锚点，保存前强制校验 ≤ 600 Tokens |
+| `agy-pool handoff` | `[<tid>]` | 仅生成/预览三层交接包 `handoffs/<tid>-seg<N>.md`，不触发换号 |
+| `agy-pool switch` | `[<tid>] --to <account_id> [--force] [--cancel]` | 两阶段切号；`--cancel` 回滚 `handoff_pending`；`--force` 须交互输入 `yes` |
+| `agy-pool status` | `[<tid>] [--json]` | 查看当前（或指定）线程详情、最新棒次及双槽位余量 |
+| `agy-pool list` | `[--all] [--json]` | 列出活跃线程与账号池总览；`--all` 包含已 `closed` 线程 |
+| `agy-pool close` | `[<tid>]` | 将线程标记为 `closed`（保留文件与历史，从默认视图隐藏） |
+| `agy-pool resume` | `[<tid>]` | （Phase 2 / Could）基于最新交接包在当前账号开启新一棒清空上下文续聊 |
+
+### 8.2 环境变量约定
+- **`AGY_POOL_HOME`**：运行时根目录覆盖（默认 `~/.antigravity/agy-pool`）
+- **`AGY_POOL_DB`**：SQLite 库文件路径覆盖（默认 `$AGY_POOL_HOME/pool.db`）
+- **`AGY_STATUS_STATE`**：AGY 状态文件路径覆盖（默认 `~/.antigravity/status-state.json`）
+- **`AGY_POOL_THREAD_ID` / `AGY_POOL_SEGMENT_ID` / `AGY_POOL_ACCOUNT`**：托管启动 `agy` 时自动注入到子进程环境变量中，供子窗口 `agy-hud` 与子终端命令识别身份。
+
+### 8.3 固定退出码表
+| 退出码 | 含义 | 典型触发场景 |
+|---:|---|---|
+| `0` | 成功 | 命令正常完成 |
+| `1` | 运行期 / IO / 拉起异常 | `pool.db` 损坏或版本过高、`agy` 拉起后 3s 内闪退、锁等待超时 |
+| `2` | 参数或校验失败 | 空标题、未注册账号槽位、`--to` 与当前账号相同、未指定 `<tid>` 且当前目录有多个活跃线程歧义 |
+| `3` | 并发冲突拦截 | 检测到其他存活 `agy.exe`（托管或非托管）且未 `--force` 确认（对齐 PRD 原型 05） |
+| `4` | 账号一致性校验失败 | 引导换号后实际登录账号 `email_hash` 与目标槽位不符（FR-10） |
+| `5` | 锚点超限 | `start` / `anchor edit` 时锚点内容估算超过 `600 Tokens`（FR-02 / AC-12） |
+| `6` | 源会话仍存活禁切号 | 源段仍处于 `running` 状态，仅冻结交接包并提示先 `/exit`（FR-08 / AC-13） |
+| `130` | 用户中断 | 切号确认过程中按 `Ctrl+C`（保留 `handoff_pending` 与交接包，支持幂等续接） |
+
+### 8.4 `--json` 稳定输出结构
+
+**`agy-pool list --json`**：
+```json
+{
+  "active_machine_account": "backup",
+  "accounts": [
+    {
+      "account_id": "main",
+      "label": "主力账号",
+      "email_hint": "a***@gmail.com",
+      "status": "active",
+      "gemini_5h_remaining": 0.08,
+      "gemini_5h_reset_at": "2026-11-26T14:20:00Z",
+      "gemini_7d_remaining": 0.72,
+      "quota_updated_at": "2026-11-26T11:29:40Z"
+    }
+  ],
+  "threads": [
+    {
+      "thread_id": "T1",
+      "title": "重构登录鉴权",
+      "cwd": "C:/Users/Administrator/Desktop/cspace",
+      "status": "active",
+      "current_segment_id": "T1-seg2",
+      "current_seq": 2,
+      "current_account_id": "backup",
+      "current_segment_status": "running"
+    }
+  ]
+}
+```
+
+**`agy-pool status [<tid>] --json`**：
+```json
+{
+  "thread": {
+    "thread_id": "T1",
+    "title": "重构登录鉴权",
+    "cwd": "C:/Users/Administrator/Desktop/cspace",
+    "anchor_path": "C:/Users/Administrator/.antigravity/agy-pool/anchors/T1.md",
+    "status": "active",
+    "segment_count": 2
+  },
+  "current_segment": {
+    "segment_id": "T1-seg2",
+    "seq": 2,
+    "account_id": "backup",
+    "status": "running",
+    "pid": 22108,
+    "conversation_id": "a2eb9845-fe56-4112-b12b-5c0537ef48df",
+    "handoff_in_path": "C:/Users/Administrator/.antigravity/agy-pool/handoffs/T1-seg1.md"
+  },
+  "accounts": [
+    {"account_id": "main", "email_hint": "a***@gmail.com", "gemini_5h_remaining": 0.08},
+    {"account_id": "backup", "email_hint": "b***@gmail.com", "gemini_5h_remaining": 0.94}
+  ]
+}
 ```
 
 ---
