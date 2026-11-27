@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>agy-pool M4 · 账号接棒原型</title>
+<style>
+:root{--paper:#f7f9fa;--ink:#0f172a;--label:#334155;--muted:#64748b;--rule:#cbd5e1;--line:#dce4e9;--model:#ebf3fa;--task-pill:#f4e0e9;--account-pill:#efebf6;--account-ink:#554176;--pool:#e8f5f3;--danger:#fceeef;--blue:#0369a1;--green:#047857;--git:#6d28d9;--teal:#0f766e;--amber:#b45309;--red:#dc2626;--ui:system-ui,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;--mono:"Maple Mono NF","SFMono-Regular",Consolas,Menlo,"PingFang SC",monospace}
+*{box-sizing:border-box}body{margin:0;background:#eef3f5;color:var(--ink);font:15px/1.55 var(--ui)}main{max-width:1088px;margin:0 auto;padding:32px 36px 26px}h1{margin:0;font-size:32px;line-height:1.25;letter-spacing:-.035em}.intro{color:var(--label);margin:8px 0 19px}button{font:inherit;color:var(--label);cursor:pointer;background:#fff;border:1px solid var(--line);border-radius:6px;padding:6px 11px}button:hover{border-color:var(--muted);color:var(--ink)}button:active{transform:translateY(1px)}button:focus-visible,.terminal:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button[aria-pressed="true"]{background:var(--model);border-color:#a7c8dd;color:var(--blue);font-weight:650}.review{display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;margin-bottom:12px}.chips{display:flex;gap:6px;flex-wrap:wrap}.platform{display:flex;gap:5px}.terminal{overflow:hidden;border:1px solid #cfdbe1;border-radius:11px;background:var(--paper);font:14px/1.55 var(--mono);font-variant-numeric:tabular-nums;animation:enter .2s ease-out both}.chrome{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding:8px 16px;color:var(--label);background:#f0f4f7;gap:10px}.chrome span:last-child{color:var(--muted)}.work{min-height:168px;padding:16px 20px 13px}.cmd{color:var(--label)}.cmd b,.idle{color:var(--green)}.query{margin:9px 0 6px;font-weight:650}.output{margin:0;color:var(--muted)}.actions{margin:0;min-height:0}.status{margin:10px 0 0;color:var(--amber);font-weight:650;animation:enter .13s ease-out both}.status.good{color:var(--green)}.status.bad{color:#b91c1c}.input{padding:8px 20px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);color:var(--label);display:flex;flex-wrap:wrap;gap:5px 16px;align-items:center}.approval{color:#92551e}.hint{color:var(--muted);font-weight:400}.hud{padding:12px 20px 14px;display:grid;gap:5px}.r{display:flex;align-items:baseline;gap:4px 13px;flex-wrap:wrap}.pill{display:inline-block;max-width:100%;border-radius:999px;padding:0 9px;background:var(--model);white-space:nowrap}.model{font-weight:690}.dot{color:var(--blue)}.badges{display:inline-flex;align-items:baseline;min-width:0;max-width:100%;gap:5px}.task-pill{min-width:0;overflow:hidden;text-overflow:ellipsis;background:var(--task-pill);color:var(--ink);font-weight:400}.account-pill{flex:none;background:var(--account-pill);color:var(--account-ink);font-weight:500}.project{color:var(--green);font-weight:650}.git{color:var(--git)}.ctx{color:var(--teal)}.quota{background:var(--pool)}.quota.danger{background:var(--danger)}.quota b{color:var(--teal)}.quota.danger b,.bad{color:#b91c1c}.quota .bar,.quota .time{color:var(--muted)}.meter{color:var(--teal)}.standby,.caps{color:var(--muted)}.caps b{color:var(--ink);font-weight:680}.bottom{display:flex;justify-content:space-between;gap:5px 12px;align-items:baseline;flex-wrap:wrap}.status-line{display:flex;align-items:baseline;gap:5px 13px;flex-wrap:wrap}.switch{color:var(--label);white-space:nowrap}.busy{color:var(--amber)}
+.menu{max-width:565px;margin-top:13px;border-top:1px solid var(--rule);padding:8px 0 1px;animation:enter .16s ease-out both}.menu h2{font:700 inherit;font-weight:700;font-size:14px;margin:0 0 6px}.options{position:relative;outline:0}.options:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}.focus-row{position:absolute;inset:0 0 auto;height:50%;border-radius:4px;background:var(--model);transform:translateY(var(--move,0%));transition:transform .11s ease-out;pointer-events:none}.option{position:relative;display:grid;grid-template-columns:18px minmax(65px,1fr) minmax(42px,70px) minmax(114px,1.35fr);gap:4px;align-items:center;padding:4px 7px;color:var(--label);cursor:pointer}.option[aria-selected="true"]{color:var(--ink);font-weight:680}.pointer{color:var(--blue)}.menu-footer{margin:6px 0 0;color:var(--muted)}.menu-footer b{color:var(--label)}.review-note{color:var(--muted);margin:12px 0 0;font-size:14px}.sr{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}[hidden]{display:none!important}@keyframes enter{from{opacity:.75;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:650px){main{padding:18px 12px}h1{font-size:26px}.chrome,.work,.input,.hud{padding-left:11px;padding-right:11px}.r,.status-line{column-gap:9px}.quota{border-radius:4px;white-space:normal}.quota .window{display:inline-block;white-space:nowrap}.option{grid-template-columns:12px minmax(64px,1fr) minmax(38px,52px) minmax(95px,1.4fr);padding-inline:3px}.menu-footer{word-spacing:0}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+/* Slightly deeper muted ink on the preview's tinted surfaces; the HUD stays in the R4 palette. */
+.chrome span:last-child,.model .hint,.quota .hint,.quota .time,.focus-row~.option .hint,.review-note{color:#526479}
+@media(max-width:650px){.quota{white-space:nowrap}.quota .meter,.quota .window:last-child .time{display:none}}
+@media(max-width:350px){.quota .time{display:none}}
+</style>
+</head>
+<body><main>
+<h1>账号切换与任务接棒</h1>
+<p class="intro">agy-pool M4 · agy-hud R4 终端交互原型</p>
+<nav class="review" aria-label="原型状态与平台">
+  <div class="chips" id="scenes">
+    <button type="button" data-scene="untitled">待命名</button><button type="button" data-scene="idle">常态</button><button type="button" data-scene="low">5% 提醒</button><button type="button" data-scene="menu">账号菜单</button><button type="button" data-scene="waiting">待登录</button><button type="button" data-scene="blocked">校验未过</button><button type="button" data-scene="done">接棒后</button>
+  </div>
+  <div class="platform"><button type="button" data-platform="mac">Mac</button><button type="button" data-platform="win">Windows</button></div>
+</nav>
+<section class="terminal" id="terminal" aria-label="终端预览" tabindex="0">
+  <header class="chrome"><strong id="host">Otty</strong><span>agy-pool / zsh</span></header>
+  <div class="work">
+    <div class="cmd"><b>$</b> agy</div>
+    <p class="query" id="query">› 排查 Windows 下为什么会重复打开登录窗口</p>
+    <p class="output" id="output">已定位终端启动路径，下一步核对账号校验分支。</p>
+    <div class="actions" id="menu" hidden>
+      <div class="menu">
+        <h2 id="menu-title">切换账号</h2>
+        <div class="options" id="accounts" role="listbox" aria-labelledby="menu-title" tabindex="0">
+          <div class="focus-row" aria-hidden="true"></div>
+          <div class="option" id="opt-0" data-option="0" role="option"><span class="pointer" aria-hidden="true"></span><span id="account-0">main</span><span class="hint">当前</span><span id="current-quota">5h 5%</span></div>
+          <div class="option" id="opt-1" data-option="1" role="option"><span class="pointer" aria-hidden="true"></span><span id="account-1">backup</span><span></span><span id="other-quota">5h 86% <span class="hint">· 2m 前</span></span></div>
+        </div>
+        <p class="menu-footer"><b>↑/↓</b> 选择　 <b>Enter</b> 确认　 <b>Esc</b> 取消</p>
+      </div>
+    </div>
+    <div id="transaction" role="status"></div>
+  </div>
+  <div class="input"><span>› <span class="hint">输入消息</span></span><span class="approval">▸▸ auto mode on <span class="hint">(shift+tab to cycle)</span></span></div>
+  <div class="hud">
+    <div class="r"><span class="model pill"><span class="dot">●</span> Gemini 4 Neon <span class="hint">· high</span></span><span class="badges"><span class="pill task-pill" id="task-name">排查登录窗口</span><span class="pill account-pill" id="account-name">main</span></span><span class="project">agy-pool</span><span class="git">⎇ feat/m4</span><span>CTX <span class="ctx">▰▰▱▱▱▱▱</span> <strong>28%</strong> <span class="hint">(56k/200k)</span></span></div>
+    <div class="r"><span class="quota pill" id="quota"><b>▸ Gemini</b> <span class="window">5h <span class="meter" id="meter">━━━━┄┄</span> <strong id="quota-percent">69%</strong> <span class="time">(38m)</span></span> <span class="hint">│</span> <span class="window">7d <span class="meter">━━━┄┄┄</span> <strong>57%</strong> <span class="time">(5d 20h)</span></span></span><span class="standby">○ 3P&nbsp; 5h 100% · 7d 64%</span></div>
+    <div class="bad" id="alert" hidden>⚠ Gemini 5h 仅剩 5%，可接棒</div>
+    <div class="bottom"><div class="status-line"><strong class="idle" id="activity">● Idle</strong><span class="switch">切换账号 <span class="hint" id="shortcut">(⌘⇧Y)</span></span></div><div class="caps"><b>1</b> AGENTS · <b>3</b> MCPs · <b>24</b> Skills · <b>1</b> 钩子</div></div>
+  </div>
+</section>
+<p class="review-note">上方按钮可跳转到指定状态；也可在页面内使用对应的组合键，打开菜单后按方向键、Enter 或 Esc。</p>
+<div class="sr" aria-live="polite" id="announce"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const scenes=['untitled','idle','low','menu','waiting','blocked','done'];
+const params=new URLSearchParams(location.search);let scene='idle',platform=params.get('platform')==='win'?'win':'mac',index=0,previous='low',pendingFrom='main',pendingTo='backup';
+const menu=$('menu'),list=$('accounts'),terminal=$('terminal');
+const lowStates=new Set(['low','menu','waiting','blocked']);
+function choose(i){
+  index=i;list.style.setProperty('--move',i?'100%':'0%');
+  list.setAttribute('aria-activedescendant','opt-'+i);
+  [...list.querySelectorAll('.option')].forEach((row,j)=>{row.setAttribute('aria-selected',String(i===j));row.querySelector('.pointer').textContent=i===j?'›':''});
+}
+function draw(next){
+  scene=scenes.includes(next)?next:'idle';
+  document.body.dataset.state=scene;document.body.dataset.platform=platform;
+  const effective=scene==='menu'?previous:scene;
+  const pending=['waiting','blocked'].includes(effective),done=effective==='done';
+  const acct=done?'backup':pending?pendingFrom:'main';
+  const low=acct==='main'&&lowStates.has(effective);
+  $('host').textContent=platform==='mac'?'Otty':'Windows Terminal';
+  $('host').nextElementSibling.textContent=platform==='mac'?'agy-pool / zsh':'agy-pool / PowerShell';
+  $('shortcut').textContent=platform==='mac'?'(⌘⇧Y)':'(Ctrl+Shift+Y)';
+  $('task-name').textContent=effective==='untitled'?'todo':'排查登录窗口';
+  $('account-name').textContent=acct;
+  $('account-0').textContent=acct;$('account-1').textContent=done?'main':'backup';
+  $('current-quota').textContent=low?'5h 5%':done?'5h 86%':'5h 69%';
+  $('other-quota').textContent=done?'5h 5% · 刚刚':'5h 86% · 2m 前';
+  $('query').textContent=done?'› 读取交接包并继续任务':'› 排查 Windows 下为什么会重复打开登录窗口';
+  $('output').textContent=done?'已读交接包，接下来核对账号校验分支。':effective==='untitled'?'已收到，先查看终端启动路径。':'已定位终端启动路径，下一步核对账号校验分支。';
+  menu.hidden=scene!=='menu';
+  $('quota').classList.toggle('danger',low);
+  $('quota-percent').textContent=low?'5%!':done?'86%':'69%';
+  $('quota-percent').classList.toggle('bad',low);
+  $('meter').textContent=low?'┄┄┄┄┄┄':done?'━━━━━┄':'━━━━┄┄';
+  $('meter').classList.toggle('bad',low);
+  $('alert').hidden=!low||['waiting','blocked'].includes(scene);
+  $('activity').textContent=scene==='waiting'?'◐ waiting':scene==='blocked'?'⚠ error':'● Idle';
+  $('activity').className=scene==='waiting'?'busy':scene==='blocked'?'bad':'idle';
+  const feedback={waiting:`请完成 ${pendingTo} 的官方登录；交接包已保存`,blocked:`未确认已登录 ${pendingTo}，已保留交接包`,done:'✓ 已接棒'};
+  const pane=$('transaction');pane.replaceChildren();
+  if(feedback[scene]){const p=document.createElement('p');p.className='status '+(scene==='blocked'?'bad':scene==='done'?'good':'');p.textContent=feedback[scene];pane.append(p)}
+  document.querySelectorAll('[data-scene]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scene===scene)));
+  document.querySelectorAll('[data-platform]').forEach(b=>{if(b.tagName==='BUTTON')b.setAttribute('aria-pressed',String(b.dataset.platform===platform))});
+  choose(index);
+}
+function openMenu(from=scene){if(['waiting','blocked','menu'].includes(from))return; previous=from;index=0;draw('menu');list.focus({preventScroll:true})}
+function closeMenu(){draw(previous);terminal.focus({preventScroll:true})}
+function confirm(){if(index===0){closeMenu();return}pendingFrom=$('account-0').textContent;pendingTo=$('account-1').textContent;draw('waiting');terminal.focus({preventScroll:true})}
+for(const b of document.querySelectorAll('[data-scene]'))b.addEventListener('click',()=>{const s=b.dataset.scene;if(s==='menu'){previous='low';index=1}if(['waiting','blocked'].includes(s)){pendingFrom='main';pendingTo='backup'}draw(s);if(s==='menu')list.focus({preventScroll:true})});
+for(const b of document.querySelectorAll('button[data-platform]'))b.addEventListener('click',()=>{platform=b.dataset.platform;draw(scene)});
+list.addEventListener('click',event=>{const opt=event.target.closest('[data-option]');if(opt){choose(Number(opt.dataset.option));list.focus({preventScroll:true})}});
+document.addEventListener('keydown',e=>{
+  const shortcut=e.key.toLowerCase()==='y'&&e.shiftKey&&!e.altKey&&(platform==='mac'?e.metaKey&&!e.ctrlKey:e.ctrlKey&&!e.metaKey);
+  if(shortcut){e.preventDefault();if(!e.repeat)openMenu();return}
+  if(scene!=='menu'||document.activeElement!==list)return;
+  if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();choose((index+1)%2)}
+  if(e.key==='Escape'){e.preventDefault();closeMenu()}
+  if(e.key==='Enter'){e.preventDefault();confirm()}
+});
+if(params.get('state')==='menu'){previous='low';index=1}
+draw(params.get('state'));
+</script>
+</body></html>

@@ -43,7 +43,8 @@ sh /path/to/agy-pool/agy-pool.sh start '重构登录鉴权' --account main
 
 ## 文档索引
 
-- 产品需求文档（PRD v1.2）：[docs/agy-pool-PRD.md](docs/agy-pool-PRD.md)
+- M4 双账号接棒：[产品需求文档](docs/agy-pool-M4-PRD.md) · [R4 终端交互原型](docs/agy-pool-M4-原型.html)
+- 原产品需求文档（PRD v1.2）：[docs/agy-pool-PRD.md](docs/agy-pool-PRD.md)
 - 详细技术方案（**v2.3** · 最终定稿：相对路径去耦合 + 跨库互斥硬锁 + M0 结论）：[docs/agy-pool-技术方案.md](docs/agy-pool-技术方案.md)
 - 界面与 CLI 交互原型图（PNG + 7 张 SVG）：[docs/agy-pool-原型图/](docs/agy-pool-原型图/)
 - 测试用例规范（v1.0 黑盒场景参考，Markdown）：[docs/agy-pool-test-cases.md](docs/agy-pool-test-cases.md)
