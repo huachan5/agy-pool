@@ -115,6 +115,16 @@ def _win_error():
 class AgyRuntime:
     brain_root = Path.home() / '.gemini'
 
+    def __init__(self):
+        self._work_child: subprocess.Popen | None = None
+
+    @staticmethod
+    def _is_interactive_tty() -> bool:
+        try:
+            return bool(sys.stdin and sys.stdout and sys.stdin.isatty() and sys.stdout.isatty())
+        except Exception:
+            return False
+
     @contextmanager
     def switch_lock(self, name: str | None = None):
         kernel = _kernel()
@@ -201,11 +211,65 @@ class AgyRuntime:
         env = {key: value for key, value in os.environ.items() if not key.upper().startswith('AGY_POOL_')}
         env['AGY_STATUS_STATE'] = str(probe)
         child = self._spawn(cwd, env)
-        if self._wait_interactive(child) != 0:
+        if self._wait_foreground(child, cancel_on_interrupt=True) != 0:
             raise RuntimeIssue('临时 agy 会话异常退出。请检查 agy 和 HUD 后重试。')
 
     def _wait_interactive(self, child) -> int:
         return child.wait()
+
+    @staticmethod
+    def _terminate_process_tree(pid: int) -> None:
+        if sys.platform == 'win32':
+            try:
+                subprocess.run(
+                    ['taskkill', '/PID', str(pid), '/T', '/F'],
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    def _run_silent_auth_probe(self, cwd: Path, probe: Path, since: float, timeout: float = 10.0) -> bool:
+        exe = shutil.which('agy.exe')
+        if exe is None:
+            raise RuntimeIssue('找不到 agy.exe，请安装 Antigravity CLI 并检查 PATH。')
+        env = {key: value for key, value in os.environ.items() if not key.upper().startswith('AGY_POOL_')}
+        env['AGY_STATUS_STATE'] = str(probe)
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        child = subprocess.Popen(
+            [exe],
+            cwd=cwd,
+            env=env,
+            startupinfo=si,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                if probe.is_file():
+                    try:
+                        read_auth_probe(probe, not_before=since)
+                        return True
+                    except RuntimeIssue:
+                        pass
+                if child.poll() is not None:
+                    break
+                time.sleep(0.15)
+            return False
+        finally:
+            if child.poll() is None:
+                self._terminate_process_tree(child.pid)
+                try:
+                    child.kill()
+                except OSError:
+                    pass
+                try:
+                    child.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
 
     def guide_account_switch(self, cwd: Path, expected_hint: str, probe: Path) -> None:
         print(f'请在临时 agy 窗口输入 /logout，浏览器登录 {expected_hint}，再用 /exit 退出。', flush=True)
@@ -218,26 +282,72 @@ class AgyRuntime:
         # A new process starts after the sign-in guide exits; its HUD cannot reuse the guide's pre-login writes.
         probe.unlink(missing_ok=True)
         since = time.time()
-        print('请等新校验窗口的 HUD 显示后输入 /exit；不需要发送任务消息。', flush=True)
+        use_silent = (
+            sys.platform == 'win32'
+            and '_run_interactive' not in self.__dict__
+            and type(self)._run_interactive is AgyRuntime._run_interactive
+        )
         try:
-            self._run_interactive(cwd, probe)
+            if use_silent:
+                print('正在静默校验当前登录账号...', flush=True)
+                if not self._run_silent_auth_probe(cwd, probe, since) and self._is_interactive_tty():
+                    print('静默校验未获取到账号状态，请在校验窗口 HUD 显示后输入 /exit；不需要发送任务消息。', flush=True)
+                    self._run_interactive(cwd, probe)
+            else:
+                print('请等新校验窗口的 HUD 显示后输入 /exit；不需要发送任务消息。', flush=True)
+                self._run_interactive(cwd, probe)
             return read_auth_probe(probe, not_before=since, expected=expected)
         finally:
             probe.unlink(missing_ok=True)
 
     @staticmethod
-    def _spawn(cwd: Path, env: dict[str, str], prompt: str | None = None):
+    def _spawn(cwd: Path, env: dict[str, str], prompt: str | None = None, *, new_console: bool | None = None):
         exe = shutil.which('agy.exe')
         if exe is None:
             raise RuntimeIssue('找不到 agy.exe，请安装 Antigravity CLI 并检查 PATH。')
         argv = [exe] + (['-i', prompt] if prompt else [])
-        return subprocess.Popen(argv, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        if new_console is None:
+            new_console = (os.environ.get('AGY_POOL_NEW_CONSOLE') == '1') or (not AgyRuntime._is_interactive_tty())
+        kwargs: dict = {'cwd': cwd, 'env': env}
+        if new_console:
+            kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+        return subprocess.Popen(argv, **kwargs)
+
+    @staticmethod
+    def _wait_foreground(child, *, cancel_on_interrupt: bool = False) -> int:
+        interrupted = False
+        while True:
+            try:
+                code = child.wait()
+                break
+            except KeyboardInterrupt:
+                if cancel_on_interrupt and not interrupted:
+                    print('已请求取消；请先在 agy 中 /exit，退出后不会启动下一棒。', file=sys.stderr, flush=True)
+                interrupted = True
+        if cancel_on_interrupt and interrupted:
+            raise KeyboardInterrupt
+        return code
 
     def launch_agy(self, cwd: Path, env: dict[str, str], prompt: str | None, on_started) -> AgyProcess:
-        return self._confirm_launch(self._spawn(cwd, env, prompt), on_started)
+        in_foreground = self._is_interactive_tty() and os.environ.get('AGY_POOL_NEW_CONSOLE') != '1'
+        child = self._spawn(cwd, env, prompt, new_console=not in_foreground)
+        if in_foreground:
+            self._work_child = child
+        try:
+            return self._confirm_launch(child, on_started)
+        except BaseException:
+            if in_foreground and child.poll() is not None:
+                child.wait()
+                self._work_child = None
+            raise
 
     def finish_session(self) -> bool:
-        return False
+        child = self._work_child
+        if child is None:
+            return False
+        self._work_child = None
+        self._wait_foreground(child)
+        return True
 
     def _confirm_launch(self, child, on_started) -> AgyProcess:
         stamp = self.process_creation(child.pid)
@@ -245,11 +355,24 @@ class AgyRuntime:
             raise RuntimeIssue('agy 启动即退出。请检查安装或登录状态后重试。')
         proc = AgyProcess(child.pid, stamp)
         on_started(proc)
-        try:
-            child.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            if child.poll() is None:
-                return proc
+        deadline = time.monotonic() + 3.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if child.poll() is None:
+                    return proc
+                break
+            try:
+                child.wait(timeout=remaining)
+                break
+            except subprocess.TimeoutExpired:
+                if child.poll() is None:
+                    return proc
+                break
+            except KeyboardInterrupt:
+                if child.poll() is not None:
+                    break
+                continue
         raise RuntimeIssue('agy 在 3 秒内退出。请检查安装或登录状态后重试。')
 
     @staticmethod
