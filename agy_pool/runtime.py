@@ -278,12 +278,13 @@ class AgyRuntime:
         finally:
             probe.unlink(missing_ok=True)
 
-    def verify_current_auth(self, cwd: Path, probe: Path, expected: Identity) -> Identity:
+    def verify_current_auth(self, cwd: Path, probe: Path, expected: Identity, *, m4_mode: bool = False) -> Identity:
         # A new process starts after the sign-in guide exits; its HUD cannot reuse the guide's pre-login writes.
         probe.unlink(missing_ok=True)
         since = time.time()
         use_silent = (
-            sys.platform == 'win32'
+            not m4_mode
+            and sys.platform == 'win32'
             and '_run_interactive' not in self.__dict__
             and type(self)._run_interactive is AgyRuntime._run_interactive
         )
@@ -328,8 +329,21 @@ class AgyRuntime:
             raise KeyboardInterrupt
         return code
 
-    def launch_agy(self, cwd: Path, env: dict[str, str], prompt: str | None, on_started) -> AgyProcess:
-        in_foreground = self._is_interactive_tty() and os.environ.get('AGY_POOL_NEW_CONSOLE') != '1'
+    def launch_agy(
+        self,
+        cwd: Path,
+        env: dict[str, str],
+        prompt: str | None,
+        on_started,
+        *,
+        m4_foreground: bool = False,
+    ) -> AgyProcess:
+        if m4_foreground:
+            if not self._is_interactive_tty():
+                raise RuntimeIssue('M4 接棒要求在原交互终端前台运行，禁止回退到新控制台。')
+            in_foreground = True
+        else:
+            in_foreground = self._is_interactive_tty() and os.environ.get('AGY_POOL_NEW_CONSOLE') != '1'
         child = self._spawn(cwd, env, prompt, new_console=not in_foreground)
         if in_foreground:
             self._work_child = child

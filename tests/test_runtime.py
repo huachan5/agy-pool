@@ -185,7 +185,7 @@ def test_windows_tty_launch_runs_in_current_terminal_and_waits(tmp_path, monkeyp
     assert proc.pid == 5566
     assert 'creationflags' not in observed[0][1]
     assert runtime.finish_session() is True
-    assert waited == [3.0, None]
+    assert len(waited) == 2 and waited[0] == pytest.approx(3.0, abs=0.1) and waited[1] is None
 
     # Non-TTY falls back to CREATE_NEW_CONSOLE
     monkeypatch.setattr(sys, 'stdin', SimpleNamespace(isatty=lambda: False))

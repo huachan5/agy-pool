@@ -154,7 +154,7 @@ def test_native_macos_process_identity_and_scan(tmp_path):
     assert not runtime.is_process_alive(os.getpid(), stamp - 10)
     assert runtime.process_creation(2000000000) is None
     named = tmp_path / 'agy'
-    shutil.copy2('/bin/sleep', named)
+    shutil.copy('/bin/sleep', named)
     with subprocess.Popen([str(named), '15']) as child:
         try:
             assert any(proc.pid == child.pid and proc.created is not None for proc in runtime.scan_agy_processes())

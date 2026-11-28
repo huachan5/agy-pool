@@ -69,7 +69,7 @@ def test_migrate_v0_creates_consistent_backup(tmp_path):
         with closing(sqlite3.connect(tmp_path / 'pool.db.v0.bak')) as backup:
             assert dict(backup.execute('SELECT key,value FROM meta')) == {'schema_version': '0', 'next_thread_seq': '17'}
     with PoolStore(db).transaction(write=False) as tx:
-        assert tx.get_meta('schema_version') == '1'
+        assert tx.get_meta('schema_version') == '2'
         assert tx.get_meta('next_thread_seq') == '17'
 
 

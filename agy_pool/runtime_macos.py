@@ -170,7 +170,15 @@ class MacAgyRuntime(AgyRuntime):
                 continue
         raise RuntimeIssue('agy 在 3 秒内退出。请检查安装或登录状态后重试。')
 
-    def launch_agy(self, cwd: Path, env: dict[str, str], prompt: str | None, on_started) -> AgyProcess:
+    def launch_agy(
+        self,
+        cwd: Path,
+        env: dict[str, str],
+        prompt: str | None,
+        on_started,
+        *,
+        m4_foreground: bool = False,
+    ) -> AgyProcess:
         child = self._spawn(cwd, env, prompt)
         self._work_child = child
         try:

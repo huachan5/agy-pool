@@ -6,11 +6,14 @@ import os
 import re
 import sqlite3
 import sys
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .handoff import AnchorTooLong, HandoffBuilder
+from .m4 import EventMailbox, HudViewPublisher, M4Engine, M4Error, SharedDomainBarrier
+from .pty_proxy import resolve_native_agy, run_pty_proxy
 from .runtime import Identity, RuntimeIssue, default_runtime, new_probe, segment_conversation
 from .store import PoolStore, SensitiveData, StoreError, guard, redact, utc_now, write_text_atomic
 
@@ -57,6 +60,9 @@ def _parser():
     listing = commands.add_parser('list', help='查看账号池与线程')
     listing.add_argument('--all', action='store_true')
     listing.add_argument('--json', action='store_true')
+    run_cmd = commands.add_parser('run', help='M4 托管前台入口（透明透传原生 agy）')
+    run_cmd.add_argument('--downgrade-menu', action='store_true', help='显式启用退出后同窗账号菜单降级')
+    run_cmd.add_argument('agy_args', nargs=argparse.REMAINDER)
     return p
 
 
@@ -81,9 +87,10 @@ def _quota(value):
 
 
 class Controller:
-    def __init__(self, store: PoolStore, runtime):
+    def __init__(self, store: PoolStore, runtime, *, barrier: SharedDomainBarrier | None = None):
         self.store = store
         self.runtime = runtime
+        self.barrier = barrier or SharedDomainBarrier()
 
     def _account(self, account_id: str) -> dict:
         row = self.store.get_account(account_id)
@@ -122,12 +129,14 @@ class Controller:
                                        (actual.digest, account_id)).fetchone()
                     if clash:
                         raise _user_error(f'当前身份已绑定槽位 {clash[0]}，请检查登录账号。')
-                    existing = tx.execute('SELECT email_hash FROM accounts WHERE account_id=?', (account_id,)).fetchone()
-                    if existing and existing[0] != actual.digest:
+                    existing = tx.execute('SELECT email_hash, status FROM accounts WHERE account_id=?', (account_id,)).fetchone()
+                    if existing and existing['email_hash'] != actual.digest:
                         raise _user_error('槽位已绑定其他身份，请换一个槽位名。')
-                    tx.execute('''INSERT INTO accounts(account_id,label,email_hint,email_hash,status) VALUES (?,?,?,?,?)
+                    tx.execute('''INSERT INTO accounts(account_id,label,email_hint,email_hash,status,identity_revision)
+                                  VALUES (?,?,?,?,?,1)
                                   ON CONFLICT(account_id) DO UPDATE SET label=COALESCE(excluded.label,accounts.label),
-                                  email_hint=excluded.email_hint,status='active' ''',
+                                  email_hint=excluded.email_hint,status='active',
+                                  identity_revision=CASE WHEN accounts.status='removed' THEN accounts.identity_revision+1 ELSE accounts.identity_revision END''',
                                (account_id, args.label, actual.hint, actual.digest, 'active'))
                     self._mark_auth(tx, account_id)
                     tx.record_event('account_add', account_id=account_id)
@@ -141,7 +150,7 @@ class Controller:
                               (account_id,)).fetchone():
                     raise _user_error('仍绑定活跃任务或会话；请先退出会话并收尾。')
                 if tx.execute('SELECT 1 FROM segments WHERE account_id=? LIMIT 1', (account_id,)).fetchone():
-                    tx.execute("UPDATE accounts SET status='removed' WHERE account_id=?", (account_id,))
+                    tx.execute("UPDATE accounts SET status='removed', identity_revision=identity_revision+1 WHERE account_id=?", (account_id,))
                 else:
                     tx.execute('DELETE FROM accounts WHERE account_id=?', (account_id,))
                 if tx.get_meta('active_machine_account') == account_id:
@@ -175,7 +184,7 @@ class Controller:
 
     def _thread(self, requested: str | None, *, closed=False):
         tid = self._thread_id(requested, closed=closed)
-        with self.store.transaction(write=False) as tx:
+        with self.store.readonly_transaction() as (tx, _version):
             thread = dict(tx.execute('SELECT * FROM threads WHERE thread_id=?', (tid,)).fetchone())
             row = tx.execute('SELECT * FROM segments WHERE segment_id=?', (thread['current_segment_id'],)).fetchone()
         return thread, dict(row) if row else None
@@ -184,10 +193,14 @@ class Controller:
     def _mutex_name():
         return os.environ.get('AGY_POOL_SWITCH_MUTEX')
 
+    def _assert_barrier_clear(self):
+        try:
+            self.barrier.assert_clear_for(self.store.db_id)
+        except M4Error as exc:
+            raise RuntimeIssue(exc.message, 3) from exc
+
     @contextmanager
     def _switch_lease(self, thread_id, target):
-        import uuid
-
         with self.runtime.switch_lock(self._mutex_name()):
             pid = os.getpid()
             created = self.runtime.process_creation(pid)
@@ -235,6 +248,8 @@ class Controller:
         for segment in segments:
             if segment['status'] == 'starting' and not recover:
                 continue
+            if segment.get('segment_origin') == 'm4_native':
+                continue
             alive = self._segment_alive(segment)
             if segment['status'] == 'running' and alive:
                 continue
@@ -272,6 +287,7 @@ class Controller:
         HandoffBuilder.validate_anchor(anchor)
         account = self._account(args.account)
         with self.runtime.switch_lock(self._mutex_name()):
+            self._assert_barrier_clear()
             self.reconcile(recover=True)
             try:
                 self.runtime.verify_current_auth(cwd, new_probe(self.store, 'auth'), _identity(account))
@@ -369,6 +385,8 @@ class Controller:
         return event is not None and event[0] == 'handoff_frozen'
 
     def _bundle(self, thread, segment, explicit, *, freeze=False):
+        if segment.get('account_binding_state') == 'unverified' or segment.get('account_id') is None:
+            raise RuntimeIssue('源会话账号尚未归属（identity_unverified），禁止生成交接包。', 2)
         tid, sid = thread['thread_id'], segment['segment_id']
         relative = f'handoffs/{sid}.md'
         path = self.store.artifact(relative)
@@ -423,7 +441,7 @@ class Controller:
                 raise RuntimeIssue('源会话仍存活，请先在原窗口执行 /exit；--force 不能跳过此检查。', 6)
         return processes, mapping
 
-    def _confirm_conflicts(self, segment, force):
+    def _confirm_conflicts(self, segment, force, *, hard_block_shared: bool = False):
         processes, mapping = self._conflicts(segment)
         if not processes:
             return set()
@@ -437,6 +455,8 @@ class Controller:
                     pass
             label = f"托管 {row['thread_id']}·#{row['seq']} {row['account_id']} {redact(row['cwd'])}" if row else '非托管或无法归属'
             print(f'  PID {proc.pid}  {label}  启动时间 {started}', file=sys.stderr)
+        if hard_block_shared:
+            raise RuntimeIssue('共享登录域存在受影响的 agy 会话（shared_session）；M4 模式下 --force 同样硬阻断，请先退出受影响会话。', 3)
         if not force or not sys.stdin.isatty() or input('继续会影响上述会话。确认请输入 yes：').strip() != 'yes':
             raise RuntimeIssue('发现其他 agy 窗口，请先 /exit，或使用 --force 并在终端确认。', 3)
         return {(p.pid, p.created) for p in processes}
@@ -451,6 +471,7 @@ class Controller:
             raise _user_error('--cancel 不可和 --force 或 --transcript 同时使用。')
         tid = self._thread_id(args.tid)
         with self._switch_lease(tid, args.to):
+            self._assert_barrier_clear()
             recovered = self.reconcile(recover=True)
             thread, seg = self._thread(tid)
             if not seg:
@@ -468,6 +489,8 @@ class Controller:
             if (tid, args.to) in recovered:
                 print('已恢复上次接棒的运行状态，无需再启动。')
                 return
+            if seg.get('account_binding_state') == 'unverified' or seg.get('account_id') is None:
+                raise RuntimeIssue('源会话账号尚未归属（identity_unverified），无法换号。', 2)
             account = self._account(args.to)
             if args.to == seg['account_id']:
                 raise _user_error('目标槽位与源会话相同，请指定另一个账号。')
@@ -476,10 +499,10 @@ class Controller:
                 raise RuntimeIssue('源会话仍存活，已生成交接预览。请先 /exit 再换号。', 6)
             if seg['status'] not in ('closed', 'handoff_pending', 'failed'):
                 raise _user_error('当前会话尚不可接棒；请先查看 status。')
-            approved = self._confirm_conflicts(seg, args.force)
+            is_m4 = thread.get('origin') == 'm4_native' or seg.get('segment_origin') == 'm4_native'
+            approved = self._confirm_conflicts(seg, args.force, hard_block_shared=is_m4)
             bundle = self._bundle(thread, seg, args.transcript, freeze=True)
             cwd = Path(thread['cwd'])
-            # Validate the prompt path before the user changes machine-wide sign-in state.
             if len(self.store.artifact(bundle).as_posix()) > 235:
                 raise _user_error('交接包路径太长，请缩短 AGY_POOL_HOME 或库路径后重试。')
             with self.store.transaction() as tx:
@@ -553,7 +576,14 @@ class Controller:
         print(f"已收尾 {thread['thread_id']}；旧窗口不会被终止，历史文件保留。")
 
     def list(self, args):
-        self.reconcile()
+        # Strictly read-only (FR-08 / F10): never calls init_db(), reconcile(), process scan, or probe cleanup.
+        if not self.store.db.is_file():
+            empty = {'active_machine_account': None, 'accounts': [], 'threads': []}
+            if args.json:
+                _json(empty)
+            else:
+                print('状态库尚未初始化（只读查询不会自动创建库）。')
+            return
         snapshot = self.store.export_snapshot(args.all)
         if args.json:
             _json(snapshot)
@@ -561,27 +591,87 @@ class Controller:
         self._show_accounts(snapshot['accounts'], snapshot['active_machine_account'])
         print('任务线程')
         for row in snapshot['threads']:
-            print(f"  {row['thread_id']}  {row['title']}  #{row['current_seq']} · {row['current_account_id']} · "
+            acc_display = row['current_account_id'] if row['current_account_id'] is not None else '账号待归属'
+            print(f"  {row['thread_id']}  {row['title']}  #{row['current_seq']} · {acc_display} · "
                   f"{row['current_segment_status']}  {row['cwd']}")
         if not snapshot['threads']:
             print('  暂无线程；使用 list --all 查看历史。')
 
     def status(self, args):
-        self.reconcile()
-        thread, segment = self._thread(args.tid, closed=True)
-        snapshot = self.store.export_snapshot()
+        # Strictly read-only (FR-08 / F10): mode=ro + query_only, zero side effects.
+        tid = self._thread_id(args.tid, closed=True)
+        info = self.store.thread_status_readonly(tid)
+        if not info:
+            raise _user_error('线程不存在或已经收尾，请用 list --all 查看。')
+        thread = info['thread']
+        segment = info['current_segment']
+        accounts = info['accounts']
         th_keys = ('thread_id', 'title', 'cwd', 'anchor_path', 'status', 'segment_count')
         seg_keys = ('segment_id', 'seq', 'account_id', 'status', 'pid', 'conversation_id', 'handoff_in_path')
         acc_keys = ('account_id', 'email_hint', 'gemini_5h_remaining')
         if args.json:
-            _json({'thread': {key: thread[key] for key in th_keys},
-                   'current_segment': {key: segment[key] for key in seg_keys} if segment else None,
-                   'accounts': [{key: row[key] for key in acc_keys} for row in snapshot['accounts']]})
+            seg_out = None
+            if segment:
+                seg_out = {key: segment.get(key) for key in seg_keys}
+                seg_out['account_binding_state'] = segment.get('account_binding_state', 'verified')
+            payload = {
+                'thread': {key: thread[key] for key in th_keys},
+                'current_segment': seg_out,
+                'accounts': [{key: row[key] for key in acc_keys} for row in accounts],
+                'handoff_state': info['handoff_state'],
+                'pending_intent': info['pending_intent'],
+                'delivery_state': info['delivery_state'],
+            }
+            _json(payload)
         else:
             print(f"{thread['thread_id']}「{thread['title']}」 · {thread['status']}")
             if segment:
-                print(f"第 {segment['seq']} 棒 · {segment['account_id']} · {segment['status']}")
-            self._show_accounts(snapshot['accounts'], snapshot['active_machine_account'])
+                acc_display = segment['account_id'] if segment['account_id'] is not None else '账号待归属'
+                print(f"第 {segment['seq']} 棒 · {acc_display} · {segment['status']}")
+            if info['pending_intent']:
+                pi = info['pending_intent']
+                reason = f" ({pi['error_code']})" if pi.get('error_code') else ''
+                print(f"待接棒：目标 {pi['target_account_id']} · 状态 {pi['state']}{reason}")
+            self._show_accounts(accounts, info['active_machine_account'])
+
+    def run(self, args):
+        """M4 managed foreground wrapper entry: spawns native agy with per-launch mailbox & HUD view."""
+        native = resolve_native_agy()
+        if not native:
+            raise RuntimeIssue('找不到原生 agy 可执行文件，请检查安装或 PATH。')
+        extra = list(args.agy_args or [])
+        if extra and extra[0] == '--':
+            extra = extra[1:]
+        launch_id = f'LCH-{uuid.uuid4().hex[:12]}'
+        mailbox = EventMailbox(self.store, launch_id)
+        view = HudViewPublisher(self.store, launch_id)
+        env = {key: value for key, value in os.environ.items() if not key.upper().startswith('AGY_POOL_')}
+        env.update({
+            'AGY_POOL_M4_VERSION': '1',
+            'AGY_POOL_LAUNCH_ID': launch_id,
+            'AGY_POOL_MAILBOX_DIR': str(mailbox.dir),
+            'AGY_POOL_VIEW_PATH': str(view.path),
+        })
+        cwd = Path.cwd().resolve()
+        engine = M4Engine(self.store, barrier=self.barrier)
+        if sys.platform != 'win32' and sys.stdin.isatty() and sys.stdout.isatty():
+            code = run_pty_proxy(
+                [native, *extra],
+                cwd=cwd,
+                env=env,
+                hotkey_enabled=True,
+                on_tick=lambda: mailbox.poll_and_consume(engine, cwd=cwd),
+            )
+            if code != 0:
+                raise RuntimeIssue(f'agy 退出码 {code}', code)
+        else:
+            import subprocess
+
+            proc = subprocess.Popen([native, *extra], cwd=cwd, env=env)
+            code = proc.wait()
+            mailbox.poll_and_consume(engine, cwd=cwd)
+            if code != 0:
+                raise RuntimeIssue(f'agy 退出码 {code}', code)
 
 
 def main(argv=None, *, runtime=None) -> int:
@@ -593,7 +683,9 @@ def main(argv=None, *, runtime=None) -> int:
         base = Path(os.environ.get('AGY_POOL_HOME', Path.home() / '.antigravity' / 'agy-pool')).expanduser()
         db = Path(os.environ.get('AGY_POOL_DB', base / 'pool.db')).expanduser()
         store = PoolStore(db, base)
-        store.init_db()
+        is_readonly = args.command in ('list', 'status') or (args.command == 'account' and args.action == 'list')
+        if not is_readonly:
+            store.init_db()
         if args.command == 'init':
             print(f'状态库已就绪：{redact(str(store.home))}')
         else:
@@ -603,7 +695,6 @@ def main(argv=None, *, runtime=None) -> int:
                 try:
                     command(args)
                 finally:
-                    # The controller's locks are released before waiting on the terminal owner.
                     waited = controller.runtime.finish_session()
                 if waited:
                     controller.reconcile()
@@ -613,6 +704,9 @@ def main(argv=None, *, runtime=None) -> int:
     except KeyboardInterrupt:
         print('已中断；若已冻结交接包，可重跑 switch 或执行 switch --cancel。一直打开的临时窗口请手动 /exit。', file=sys.stderr)
         return 130
+    except M4Error as error:
+        print(f'{error.message} [{error.reason_code}]', file=sys.stderr)
+        return 3
     except RuntimeIssue as error:
         print(error, file=sys.stderr)
         return error.code
